@@ -24,7 +24,7 @@ OLLAMA_BASE_URL = "http://localhost:11434"
 
 # 1. Das Modell zum GENERIEREN des Tests (LLM)
 Settings.llm = Ollama(
-    model="phi3:3.8b-mini-4k-instruct-q4_K_M",       #llama2 old
+    model="phi3:3.8b-mini-4k-instruct-q4_K_M",       # phi3:3.8b-mini-4k-instruct-q4_K_M llama2 old
     request_timeout=120.0,
     temperature=0.1,  # Niedrige Temperatur für Fakten und strikte Formatierung
     base_url=OLLAMA_BASE_URL
@@ -108,15 +108,27 @@ def erstelle_vokabeltest_fuer(index, kategorie_name: str, anzahl_fragen: int = 5
 
     # DEFINITION DES STRENGEN SYSTEM-PROMPTS
     VOKABEL_TEST_PROMPT_TEMPLATE = (
-            "Du bist ein Vokabeltrainer. Verwende NUR die folgenden Vokabeln, "
-        "um einen Multiple-Choice-Test mit {anzahl_fragen} Fragen zu erstellen.\n\n"
-        "Jede Frage fragt nach der deutschen Übersetzung einer spanischen Vokabel.\n"
-        "Verwende nur Vokabeln aus dem Kontext unten.\n\n"
-        "Format:\n"
-        "Frage: Was ist die deutsche Übersetzung von <Spanisch>?\n"
-        "A) ...\nB) ...\nC) ...\n"
-        "Markiere die richtige Antwort mit einem Sternchen (*).\n\n"
-        "KONTEXT:\n{context_str}\n"
+             "Du bist ein strenger Vokabeltrainer. Verwende NUR die folgenden Vokabeln.\n"
+            "Erstelle einen Multiple-Choice-Test mit **genau {anzahl_fragen} Fragen**, "
+            "außer es stehen weniger Vokabeln zur Verfügung. "
+            "Wenn weniger Vokabeln verfügbar sind, erstelle entsprechend weniger Aufgaben.\n\n"
+            
+            "⚠️ WICHTIG: Für **jede** Frage gelten diese Regeln strikt:\n"
+            "1. Es MUSS genau **3 Antwortmöglichkeiten (A, B, C)** geben – nicht mehr, nicht weniger.\n"
+            "2. Genau **eine** der Antwortmöglichkeiten ist korrekt.\n"
+            "3. Die korrekte Antwort MUSS mit einem Sternchen (*) am Ende markiert werden.\n"
+            "4. Alle falschen Antworten MÜSSEN ebenfalls aus den gegebenen Vokabeln stammen.\n"
+            "5. Verwende **niemals Wörter außerhalb des Kontexts**.\n\n"
+
+            "Format für jede Frage:\n"
+            "Frage: Was ist die deutsche Übersetzung von <Spanisch>?\n"
+            "A) ...\n"
+            "B) ...\n"
+            "C) ...\n"
+            "Markiere die richtige Antwort mit einem Sternchen (*).\n\n"
+
+            "KONTEXT (nur diese Vokabeln dürfen verwendet werden):\n"
+            "{context_str}\n"
     )
     # Den Prompt als LlamaIndex PromptTemplate vorbereiten
     # Die Platzhalter {query_str} und {context_str} sind LlamaIndex-intern
@@ -133,14 +145,14 @@ def erstelle_vokabeltest_fuer(index, kategorie_name: str, anzahl_fragen: int = 5
         streaming=False,
         # Hier geben wir den Prompt als System-Prompt an
         # LlamaIndex wird dies in der finalen Generierungsphase an das LLM übergeben
-        text_qa_template=PromptTemplate(final_test_prompt) 
+        text_qa_template=PromptTemplate(final_test_prompt)
     )
 
     # 1. RETRIEVER ERSTELLEN UND FILTER ANWENDEN
     # Wir erstellen den Retriever direkt aus dem Index und übergeben den Metadaten-Filter.
     retriever = index.as_retriever(
         filters=kategorie_filter, # <--- Der Filter wird hier angewendet
-        similarity_top_k=5        #old 20
+        similarity_top_k=5        #old 20, max(anzahl_fragen * 2, 10)?
     )
 
     # 2. RETRIEVAL TESTEN (DEBUGGING)
@@ -198,7 +210,7 @@ if __name__ == "__main__":
     # "Alltag", "Adjektive", "Wetter", etc.
     
     # 3. Testen der Funktion (mit korrekter Kategorie)
-    ergebnis_gut = erstelle_vokabeltest_fuer(vokabel_index, kategorie_name="Alltag")
+    ergebnis_gut = erstelle_vokabeltest_fuer(vokabel_index, kategorie_name="Zeit")  #Alltag/Adjektive gut
     print(ergebnis_gut)
 
     print("\n" + "="*50 + "\n")
