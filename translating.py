@@ -79,6 +79,15 @@ def finde_lemma(spanisches_wort: str) -> str:
     # 3️⃣ Lemmatisieren mit spaCy
     doc = nlp_es(wort_klein)
     for token in doc:
+        # WICHTIG: Substantive NICHT lemmatisieren!
+        # química (Chemie) != químico (Chemiker/chemisch)
+        if token.pos_ == "NOUN":
+            return wort_klein
+        
+        # Bei Pronomen das Original-Wort zurückgeben
+        if token.pos_ == "PRON":
+            return wort_klein
+            
         lemma = token.lemma_.lower()
 
         # Korrigiere fehlerhafte spaCy-Lemmata für bekannte Sonderfälle
@@ -123,26 +132,59 @@ def uebersetze_und_lerne(index, satz: str, csv_datei: str):
     # Filtere nur Satzzeichen und Leerzeichen heraus
     IGNORIERE_WORTARTEN = {"PUNCT", "SPACE"}
     
-    # Speichere Tokens mit ihren Wortarten
-    token_info = {}  # {wort: wortart}
+    # Speichere Tokens mit ihren Wortarten basierend auf Satz-Kontext
+    token_info = {}  # {lemma: wortart}
     tokens = []
     for token in doc:
         # Ignoriere nur Satzzeichen und Leerzeichen
         if token.pos_ not in IGNORIERE_WORTARTEN:
             wort_lower = token.text.lower()
-            tokens.append(wort_lower)
-            token_info[wort_lower] = token.pos_
+            
+            # WICHTIG: Nutze Satz-Kontext für korrekte Lemmatisierung
+            # Substantive NICHT lemmatisieren (química bleibt química)
+            if token.pos_ == "NOUN":
+                lemma = wort_lower
+            elif token.pos_ == "PRON":
+                lemma = wort_lower
+            else:
+                # Nur Verben, Adjektive etc. lemmatisieren
+                lemma = token.lemma_.lower()
+            
+            tokens.append(lemma)
+            token_info[lemma] = token.pos_  # Speichere Wortart mit Lemma als Schlüssel
 
-    # 2️⃣ Prüfen, ob Wörter im Index / CSV existieren
-    vorhandene, neue = pruefe_vokabeln(csv_datei, tokens)
+    # 2️⃣ Prüfen, ob Wörter im Index / CSV existieren (mit Original-Satz für Kontext)
+    vorhandene, neue = pruefe_vokabeln(csv_datei, tokens, satz)
 
-    # 3️⃣ Satzübersetzung (über LLM)
-    uebersetzung, erklaerung = uebersetze_mit_llm(satz, neue)
-
-    # 4️⃣ Neue Wörter automatisch zur CSV hinzufügen (mit Wortart-Info)
+    # 2.5️⃣ Erstelle korrigiertes token_info mit Original-Formen
+    token_info_korrigiert = {}
+    neue_original_liste = []
+    lemma_to_original_map = {}  # Mapping: Lemma → Original-Form
+    
     if neue:
-        fuege_neue_vokabeln_hinzu(csv_datei, neue, satz, token_info)
-        print("🆕 Neue Wörter erkannt und gespeichert:", ", ".join(neue))
+        doc_satz = nlp_es(satz)
+        for wort in neue:
+            for token in doc_satz:
+                if token.lemma_.lower() == wort.lower() or token.text.lower() == wort.lower():
+                    original_form = token.text.lower()
+                    # Speichere Mapping
+                    lemma_to_original_map[wort] = original_form
+                    token_info_korrigiert[wort] = token.pos_  # Lemma als Key, aber mit korrekter POS aus Satz!
+                    neue_original_liste.append(original_form)
+                    break
+            # Falls nicht gefunden, verwende das lemmatisierte Wort
+            if wort not in lemma_to_original_map:
+                lemma_to_original_map[wort] = wort
+                token_info_korrigiert[wort] = token_info.get(wort, "UNKNOWN")
+                neue_original_liste.append(wort)
+
+    # 3️⃣ Satzübersetzung (über LLM) - mit Original-Formen!
+    uebersetzung, erklaerung = uebersetze_mit_llm(satz, neue_original_liste if neue else [])
+
+    # 4️⃣ Neue Wörter automatisch zur CSV hinzufügen (mit korrigiertem token_info)
+    if neue:
+        fuege_neue_vokabeln_hinzu(csv_datei, neue, satz, token_info_korrigiert, lemma_to_original_map)
+        print("🆕 Neue Wörter erkannt und gespeichert:", ", ".join(neue_original_liste))
     
     if vorhandene:
         print("✅ Bereits bekannte Wörter:", ", ".join(vorhandene))
@@ -159,10 +201,10 @@ def uebersetze_und_lerne(index, satz: str, csv_datei: str):
     return uebersetzung
 
 
-def pruefe_vokabeln(csv_datei: str, tokens: list[str]):
+def pruefe_vokabeln(csv_datei: str, tokens: list[str], original_satz: str = None):
     """
     Prüft, welche Wörter bereits in der CSV-Vokabelliste enthalten sind.
-    Lemmatisiert spanische Wörter, um Grundformen zu speichern.
+    Lemmatisiert spanische Wörter basierend auf dem Kontext im Original-Satz.
     Gibt zwei Mengen zurück:
       - vorhandene: bekannte Wörter aus der CSV
       - neue: unbekannte Wörter, die ergänzt werden müssen
@@ -175,9 +217,29 @@ def pruefe_vokabeln(csv_datei: str, tokens: list[str]):
 
     vorhandene = []
     neue = []
+    
+    # Wenn Original-Satz vorhanden, analysiere ihn für bessere Lemmatisierung
+    satz_tokens = {}
+    if original_satz:
+        doc_satz = nlp_es(original_satz)
+        for token in doc_satz:
+            wort_lower = token.text.lower()
+            # Speichere: Wort → (POS, Lemma)
+            # Für Substantive: behalte Original-Form
+            if token.pos_ == "NOUN":
+                satz_tokens[wort_lower] = (token.pos_, wort_lower)
+            elif token.pos_ == "PRON":
+                satz_tokens[wort_lower] = (token.pos_, wort_lower)
+            else:
+                satz_tokens[wort_lower] = (token.pos_, token.lemma_.lower())
 
     for wort in tokens:
-        lemma = finde_lemma(wort.lower())
+        # Nutze Kontext-basierte Lemmatisierung, falls verfügbar
+        if wort.lower() in satz_tokens:
+            _, lemma = satz_tokens[wort.lower()]
+        else:
+            # Fallback: Standard-Lemmatisierung
+            lemma = finde_lemma(wort.lower())
 
         if lemma in df['Spanisch'].astype(str).str.lower().values:
             vorhandene.append(lemma)
@@ -215,10 +277,11 @@ def uebersetze_mit_llm(satz, neue_vokabeln):
 
     return translation, explanation
 
-def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=None):
+def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=None, lemma_to_original=None):
     """
     Fügt neue Wörter in die CSV ein mit LLM-generierten Übersetzungen und Kategorien.
-    token_info: Dictionary mit {wort: wortart} für bessere Übersetzungen
+    token_info: Dictionary mit {lemma: wortart_im_satz_kontext}
+    lemma_to_original: Dictionary mit {lemma: original_form_im_satz}
     """
     heute = datetime.now().strftime("%Y-%m-%d")
     
@@ -237,14 +300,19 @@ def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=
     
     # LLM-Prompt für jede neue Vokabel
     for wort in neue_worter:
+        # WICHTIG: Verwende die Original-Form aus dem Mapping
+        original_wort = lemma_to_original.get(wort, wort) if lemma_to_original else wort
+        wortart_im_satz = token_info.get(wort, "UNKNOWN") if token_info else "UNKNOWN"
+        
+        print(f"   [DEBUG] Lemma '{wort}' → Original: '{original_wort}' (POS: {wortart_im_satz})")
+        
         # Wortart herausfinden
-        wortart = token_info.get(wort, "UNKNOWN") if token_info else "UNKNOWN"
-        wortart_deutsch = WORTART_DEUTSCH.get(wortart, "Wort")
+        wortart_deutsch = WORTART_DEUTSCH.get(wortart_im_satz, "Wort")
         
         prompt = (
-            f"Du bist ein Spanisch-Lehrer. Analysiere das spanische Wort '{wort}' im Kontext des Satzes:\n"
+            f"Du bist ein Spanisch-Lehrer. Analysiere das spanische Wort '{original_wort}' im Kontext des Satzes:\n"
             f"'{original_satz}'\n\n"
-            f"WICHTIG: '{wort}' ist ein {wortart_deutsch} ({wortart})!\n\n"
+            f"WICHTIG: '{original_wort}' ist ein {wortart_deutsch} ({wortart_im_satz})!\n\n"
             f"Gib folgende Informationen zurück (genau in diesem Format):\n"
             f"DEUTSCH: [NUR EIN deutsches Wort als Übersetzung, keine Erklärung]\n"
             f"KATEGORIE: [passende Kategorie wie 'Alltag', 'Verben', 'Adjektive', 'Artikel', 'Präpositionen', etc.]\n\n"
@@ -275,16 +343,23 @@ def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=
             
             # Fallback, falls Parsing fehlschlägt
             if not deutsch:
-                deutsch = f"[{wort}]"
+                deutsch = f"[{original_wort}]"
+            
+            # KORREKTUR: Wenn deutsches Wort großgeschrieben ist → es ist ein Substantiv!
+            # Überschreibe falsche spaCy-Klassifikation
+            if deutsch and len(deutsch) > 0 and deutsch[0].isupper():
+                # Deutsche Substantive sind IMMER großgeschrieben
+                print(f"   [KORREKTUR] '{deutsch}' ist großgeschrieben → '{original_wort}' ist ein Substantiv!")
+                kategorie = "Substantive"  # Korrigiere Kategorie
                 
         except Exception as e:
-            print(f"⚠️  Fehler beim Abrufen der Übersetzung für '{wort}': {e}")
+            print(f"⚠️  Fehler beim Abrufen der Übersetzung für '{original_wort}': {e}")
             deutsch = ""
             kategorie = "Unbekannt"
         
-        # Zur CSV hinzufügen - Reihenfolge muss mit CSV-Spalten übereinstimmen
+        # Zur CSV hinzufügen - verwende ORIGINAL_WORT statt wort
         neue_zeile = {
-            "Spanisch": wort,
+            "Spanisch": original_wort,  # Verwende Original-Form aus dem Satz!
             "Deutsch": deutsch,
             "Beispielsatz": original_satz,
             "last_repetition": heute,
@@ -331,7 +406,7 @@ def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=
         df = df[["Spanisch", "Deutsch", "Beispielsatz", "last_repetition", "Kategorie"]]
         df.to_csv(csv_datei, sep=';', index=False)
         
-        print(f"   ✓ {wort} → {deutsch} ({kategorie})")
+        print(f"   ✓ {original_wort} → {deutsch} ({kategorie})")
     
     print(f"🆕 {len(neue_worter)} neue Vokabel(n) mit Übersetzung hinzugefügt.")
 
@@ -339,4 +414,4 @@ def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=
 if __name__ == "__main__":
 
     index = build_test_index()
-    uebersetze_und_lerne(index,satz="él estudia ciencias.",csv_datei="../vokabeln.csv")
+    uebersetze_und_lerne(index,satz="él estudia química.",csv_datei="../vokabeln.csv")
