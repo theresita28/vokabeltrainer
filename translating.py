@@ -11,93 +11,106 @@ import pandas as pd
 from datetime import date
 import spacy
 
+try:
+    import simplemma
+    USE_SIMPLEMMA = True
+    print("✓ simplemma verfügbar → werde simplemma für Lemmatization verwenden.")
+except Exception:
+    USE_SIMPLEMMA = False
+    print("⚠ simplemma nicht verfügbar → benutze spaCy-Fallback mit Korrekturen.")
+
 nlp_es = spacy.load("es_core_news_sm")
+
+
+
+# ⚠️ KORREKTUR-MAP für fehlerhafte spaCy-Lemmatisierungen
+SPACY_LEMMA_KORREKTUREN = {
+    "comar": "comer",      # spaCy Bug: come/comen werden fälschlicherweise zu "comar"
+    "aprendo": "aprender", # spaCy Bug: aprendo bleibt aprendo statt aprender
+    # Hier können weitere fehlerhafte Lemmas hinzugefügt werden
+}
+
 def finde_lemma(spanisches_wort: str) -> str:
     """
-    Gibt die Grundform (Infinitiv oder Basisform) eines spanischen Wortes zurück.
-    Spezielle Behandlung für Pronomen, Akzentwörter und häufige Formen.
+    Robust: Verwende pattern.es, falls verfügbar; sonst spaCy + Korrekturen + Heuristik.
+    Liefert: lemma / Grundform (bei Verben Infinitiv), behandelt Akzente + Pronomen.
     """
-    # Akzent-sensitives Mapping (um Fehlinterpretationen zu vermeiden)
+    if not spanisches_wort:
+        return spanisches_wort
+
+    wort_orig = spanisches_wort.strip()
+    wort = wort_orig.lower()
+
+    # 1) Sonderfälle / Akzent-sensitive Mapping (wie du schon hattest)
     sonderformen = {
-        "él": "él",   # er
-        "el": "el",   # der
-        "sí": "sí",   # ja
-        "si": "si",   # wenn
-        "tú": "tú",   # du
-        "tu": "tu",   # dein
-        "mí": "mí",   # mir / mich
-        "mi": "mi",   # mein
-        "sé": "sé",   # ich weiß / sei
-        "se": "se",   # sich
-        "dé": "dé",   # gebe (Subjunktiv)
-        "de": "de"    # von
+        "él": "él", "el": "el", "sí": "sí", "si": "si", "tú": "tú", "tu": "tu",
+        "mí": "mí", "mi": "mi", "sé": "sé", "se": "se", "dé": "dé", "de": "de"
     }
-
     pronomen_mapping = {
-        "yo": "yo",
-        "tú": "tú",
-        "usted": "usted",
-        "él": "él",
-        "ella": "ella",
-        "ello": "ello",
-        "nosotros": "nosotros",
-        "nosotras": "nosotros",
-        "vosotros": "vosotros",
-        "vosotras": "vosotros",
-        "ellos": "ellos",
-        "ellas": "ellos",
-        "ustedes": "ustedes",
-        "me": "me",
-        "te": "te",
-        "se": "se",
-        "lo": "lo",
-        "la": "la",
-        "los": "los",
-        "las": "los",
-        "le": "le",
-        "les": "le"
+        "yo":"yo","tú":"tú","usted":"usted","él":"él","ella":"ella","ello":"ello",
+        "nosotros":"nosotros","nosotras":"nosotros","vosotros":"vosotros","vosotras":"vosotros",
+        "ellos":"ellos","ellas":"ellos","ustedes":"ustedes","me":"me","te":"te","se":"se",
+        "lo":"lo","la":"la","los":"los","las":"las","le":"le","les":"les"
     }
 
-    # Wichtig: strip() verwenden, aber NICHT lower() bei Akzentwörtern
-    wort_stripped = spanisches_wort.strip()
-    wort_klein = wort_stripped.lower()
+    # Prüfe Original (mit Akzent) zuerst
+    if wort_orig in sonderformen:
+        return sonderformen[wort_orig]
 
-    # 1️⃣ Zuerst mit Original-Schreibweise (inkl. Akzente) prüfen
-    if wort_stripped in sonderformen:
-        return sonderformen[wort_stripped]
-    
-    if wort_stripped in pronomen_mapping:
-        return pronomen_mapping[wort_stripped]
+    if wort_orig in pronomen_mapping:
+        return pronomen_mapping[wort_orig]
 
-    # 2️⃣ Dann mit Kleinbuchstaben prüfen
-    if wort_klein in sonderformen:
-        return sonderformen[wort_klein]
+    # Prüfe Kleinschreibung
+    if wort in sonderformen:
+        return sonderformen[wort]
+    if wort in pronomen_mapping:
+        return pronomen_mapping[wort]
 
-    if wort_klein in pronomen_mapping:
-        return pronomen_mapping[wort_klein]
+    # 2) Wenn simplemma verfügbar → verwenden (sehr zuverlässig für Verben)
+    if USE_SIMPLEMMA:
+        try:
+            lemma_result = simplemma.lemmatize(wort, lang='es')
+            if lemma_result and lemma_result != wort:
+                return lemma_result.lower()
+        except Exception:
+            # falls simplemma aus irgendeinem Grund versagt, fall through
+            pass
 
-    # 3️⃣ Lemmatisieren mit spaCy
-    doc = nlp_es(wort_klein)
-    for token in doc:
-        # WICHTIG: Substantive NICHT lemmatisieren!
-        # química (Chemie) != químico (Chemiker/chemisch)
-        if token.pos_ == "NOUN":
-            return wort_klein
-        
-        # Bei Pronomen das Original-Wort zurückgeben
-        if token.pos_ == "PRON":
-            return wort_klein
-            
-        lemma = token.lemma_.lower()
+    # 3) spaCy-Fallback: benutze POS & Lemma, aber korrigiere bekannte spaCy-Fehler
+    lemma = None
+    try:
+        doc = nlp_es(wort)
+        for token in doc:
+            # Bei Substantiven/Pronomen: oft sinnvoll, Originalform beizubehalten
+            if token.pos_ == "NOUN":
+                lemma = wort  # behalte Satzform
+            elif token.pos_ == "PRON":
+                lemma = wort
+            else:
+                lemma = token.lemma_.lower()
+            break
+    except Exception:
+        lemma = wort
 
-        # Korrigiere fehlerhafte spaCy-Lemmata für bekannte Sonderfälle
-        if wort_klein in sonderformen and lemma != sonderformen[wort_klein]:
-            return sonderformen[wort_klein]
+    # 4) Korrektur-Map von spaCy-Bugs anwenden (deine Map)
+    if lemma in SPACY_LEMMA_KORREKTUREN:
+        return SPACY_LEMMA_KORREKTUREN[lemma]
 
-        return lemma
+    # 5) Wenn lemma == wort (spaCy hat nichts sinnvolles geliefert), heuristische Fallbacks
+    if lemma == wort or not lemma:
+        # Einfache heuristiken für gängige spanische Konjugationen:
+        if wort.endswith("o"):
+            return wort[:-1] + "ar"   # z.B. hablo-> hablar (heuristisch)
+        if wort.endswith(("as","a","amos","an")):
+            return (wort[:-1] + "ar") if wort.endswith(("as","a")) else (wort[:-4] + "ar") if wort.endswith("amos") else wort[:-2] + "ar"
+        if wort.endswith(("es","e","emos","en")):
+            return (wort[:-2] + "er") if wort.endswith("es") else (wort[:-1] + "er")
+        if wort.endswith(("imos","en","ieron","ió","ió")):
+            return wort[:-2] + "ir"
+        # sonst zurückgeben
+        return wort
 
-    # 4️⃣ Fallback
-    return wort_klein
+    return lemma
 
 
 
@@ -141,14 +154,23 @@ def uebersetze_und_lerne(index, satz: str, csv_datei: str):
             wort_lower = token.text.lower()
             
             # WICHTIG: Nutze Satz-Kontext für korrekte Lemmatisierung
-            # Substantive NICHT lemmatisieren (química bleibt química)
+            # Substantive → Einzahl (mit simplemma falls verfügbar)
             if token.pos_ == "NOUN":
-                lemma = wort_lower
+                if USE_SIMPLEMMA:
+                    lemma = simplemma.lemmatize(wort_lower, lang='es')
+                else:
+                    lemma = wort_lower  # Fallback: behalte Original
             elif token.pos_ == "PRON":
-                lemma = wort_lower
+                lemma = wort_lower  # Pronomen nicht ändern
             else:
-                # Nur Verben, Adjektive etc. lemmatisieren
-                lemma = token.lemma_.lower()
+                # Verben, Adjektive etc. → Grundform (mit simplemma falls verfügbar)
+                if USE_SIMPLEMMA:
+                    lemma = simplemma.lemmatize(wort_lower, lang='es')
+                else:
+                    # Fallback: spaCy + Korrekturen
+                    lemma = token.lemma_.lower()
+                    if lemma in SPACY_LEMMA_KORREKTUREN:
+                        lemma = SPACY_LEMMA_KORREKTUREN[lemma]
             
             tokens.append(lemma)
             token_info[lemma] = token.pos_  # Speichere Wortart mit Lemma als Schlüssel
@@ -156,25 +178,25 @@ def uebersetze_und_lerne(index, satz: str, csv_datei: str):
     # 2️⃣ Prüfen, ob Wörter im Index / CSV existieren (mit Original-Satz für Kontext)
     vorhandene, neue = pruefe_vokabeln(csv_datei, tokens, satz)
 
-    # 2.5️⃣ Erstelle korrigiertes token_info mit Original-Formen
+    # 2.5️⃣ Erstelle korrigiertes token_info mit Original-Formen (für LLM-Erklärung)
     token_info_korrigiert = {}
-    neue_original_liste = []
-    lemma_to_original_map = {}  # Mapping: Lemma → Original-Form
+    neue_original_liste = []  # Für LLM-Erklärung (Satzform)
+    lemma_to_satzform_map = {}  # Mapping: Lemma → Konjugierte Form im Satz (für Erklärung)
     
     if neue:
         doc_satz = nlp_es(satz)
         for wort in neue:
             for token in doc_satz:
                 if token.lemma_.lower() == wort.lower() or token.text.lower() == wort.lower():
-                    original_form = token.text.lower()
-                    # Speichere Mapping
-                    lemma_to_original_map[wort] = original_form
+                    satzform = token.text.lower()  # Konjugierte Form (für Erklärung)
+                    # Speichere Mapping (für LLM-Erklärung)
+                    lemma_to_satzform_map[wort] = satzform
                     token_info_korrigiert[wort] = token.pos_  # Lemma als Key, aber mit korrekter POS aus Satz!
-                    neue_original_liste.append(original_form)
+                    neue_original_liste.append(satzform)
                     break
             # Falls nicht gefunden, verwende das lemmatisierte Wort
-            if wort not in lemma_to_original_map:
-                lemma_to_original_map[wort] = wort
+            if wort not in lemma_to_satzform_map:
+                lemma_to_satzform_map[wort] = wort
                 token_info_korrigiert[wort] = token_info.get(wort, "UNKNOWN")
                 neue_original_liste.append(wort)
 
@@ -183,11 +205,15 @@ def uebersetze_und_lerne(index, satz: str, csv_datei: str):
 
     # 4️⃣ Neue Wörter automatisch zur CSV hinzufügen (mit korrigiertem token_info)
     if neue:
-        fuege_neue_vokabeln_hinzu(csv_datei, neue, satz, token_info_korrigiert, lemma_to_original_map)
-        print("🆕 Neue Wörter erkannt und gespeichert:", ", ".join(neue_original_liste))
+        fuege_neue_vokabeln_hinzu(csv_datei, neue, satz, token_info_korrigiert, lemma_to_satzform_map)
+        print("🆕 Neue Wörter erkannt und gespeichert:", ", ".join(neue))  # Zeige Lemmas/Grundformen
     
     if vorhandene:
         print("✅ Bereits bekannte Wörter:", ", ".join(vorhandene))
+    
+    # Abschließende Zusammenfassung
+    if not neue and not vorhandene:
+        print("✅ Alle Wörter waren bereits bekannt.")
 
     # 5️⃣ Ausgabe
     print("\n--- Übersetzung ---")
@@ -195,8 +221,6 @@ def uebersetze_und_lerne(index, satz: str, csv_datei: str):
     if erklaerung:
         print("\n--- Neue Vokabeln erklärt ---")
         print(erklaerung)
-    else:
-        print("\n✅ Alle Wörter waren bereits bekannt.")
     
     return uebersetzung
 
@@ -225,21 +249,27 @@ def pruefe_vokabeln(csv_datei: str, tokens: list[str], original_satz: str = None
         for token in doc_satz:
             wort_lower = token.text.lower()
             # Speichere: Wort → (POS, Lemma)
-            # Für Substantive: behalte Original-Form
+            # Für Substantive und Pronomen: verwende simplemma (falls verfügbar)
             if token.pos_ == "NOUN":
-                satz_tokens[wort_lower] = (token.pos_, wort_lower)
+                if USE_SIMPLEMMA:
+                    lemma = simplemma.lemmatize(wort_lower, lang='es')
+                else:
+                    lemma = wort_lower
+                satz_tokens[wort_lower] = (token.pos_, lemma)
             elif token.pos_ == "PRON":
                 satz_tokens[wort_lower] = (token.pos_, wort_lower)
             else:
-                satz_tokens[wort_lower] = (token.pos_, token.lemma_.lower())
+                # Verben, Adjektive etc.: verwende simplemma (falls verfügbar)
+                if USE_SIMPLEMMA:
+                    lemma = simplemma.lemmatize(wort_lower, lang='es')
+                else:
+                    lemma = token.lemma_.lower()
+                satz_tokens[wort_lower] = (token.pos_, lemma)
 
     for wort in tokens:
-        # Nutze Kontext-basierte Lemmatisierung, falls verfügbar
-        if wort.lower() in satz_tokens:
-            _, lemma = satz_tokens[wort.lower()]
-        else:
-            # Fallback: Standard-Lemmatisierung
-            lemma = finde_lemma(wort.lower())
+        # "wort" ist bereits das korrekte Lemma aus der Tokenisierung!
+        # Keine erneute Lemmatisierung nötig
+        lemma = wort
 
         if lemma in df['Spanisch'].astype(str).str.lower().values:
             vorhandene.append(lemma)
@@ -277,11 +307,11 @@ def uebersetze_mit_llm(satz, neue_vokabeln):
 
     return translation, explanation
 
-def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=None, lemma_to_original=None):
+def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=None, lemma_to_satzform=None):
     """
     Fügt neue Wörter in die CSV ein mit LLM-generierten Übersetzungen und Kategorien.
     token_info: Dictionary mit {lemma: wortart_im_satz_kontext}
-    lemma_to_original: Dictionary mit {lemma: original_form_im_satz}
+    lemma_to_satzform: Dictionary mit {lemma: konjugierte_form_im_satz} für bessere LLM-Prompts
     """
     heute = datetime.now().strftime("%Y-%m-%d")
     
@@ -300,28 +330,39 @@ def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=
     
     # LLM-Prompt für jede neue Vokabel
     for wort in neue_worter:
-        # WICHTIG: Verwende die Original-Form aus dem Mapping
-        original_wort = lemma_to_original.get(wort, wort) if lemma_to_original else wort
+        # wort = Lemma/Grundform (z.B. "comer")
+        # Für den LLM-Prompt: Verwende konjugierte Form bei Erklärung
+        satzform = lemma_to_satzform.get(wort, wort) if lemma_to_satzform else wort
         wortart_im_satz = token_info.get(wort, "UNKNOWN") if token_info else "UNKNOWN"
         
-        print(f"   [DEBUG] Lemma '{wort}' → Original: '{original_wort}' (POS: {wortart_im_satz})")
+        print(f"   [DEBUG] Lemma '{wort}' → Satzform: '{satzform}' (POS: {wortart_im_satz})")
         
         # Wortart herausfinden
         wortart_deutsch = WORTART_DEUTSCH.get(wortart_im_satz, "Wort")
         
+        # Bei Verben: Verwende das LEMMA für den Prompt (Infinitiv), nicht die konjugierte Form
+        wort_fuer_prompt = wort if wortart_im_satz == "VERB" else satzform
+        
+        # Spezielle Anweisungen für Verben (Infinitiv-Form verlangen)
+        verb_hinweis = ""
+        if wortart_im_satz == "VERB":
+            verb_hinweis = "\nWICHTIG: Gib bei Verben IMMER den deutschen INFINITIV an (machen, studieren, gehen)!"
+        
         prompt = (
-            f"Du bist ein Spanisch-Lehrer. Analysiere das spanische Wort '{original_wort}' im Kontext des Satzes:\n"
-            f"'{original_satz}'\n\n"
-            f"WICHTIG: '{original_wort}' ist ein {wortart_deutsch} ({wortart_im_satz})!\n\n"
+            f"Du bist ein Spanisch-Lehrer. Übersetze das spanische Wort '{wort_fuer_prompt}' ins Deutsche.\n"
+            f"Kontext: '{original_satz}'\n\n"
+            f"WICHTIG: '{wort_fuer_prompt}' ist ein {wortart_deutsch} ({wortart_im_satz})!{verb_hinweis}\n\n"
             f"Gib folgende Informationen zurück (genau in diesem Format):\n"
             f"DEUTSCH: [NUR EIN deutsches Wort als Übersetzung, keine Erklärung]\n"
             f"KATEGORIE: [passende Kategorie wie 'Alltag', 'Verben', 'Adjektive', 'Artikel', 'Präpositionen', etc.]\n\n"
-            f"Wichtig: Bei DEUTSCH nur ein einzelnes Wort angeben, keine Sätze oder Erklärungen!\n"
+            f"Wichtig: Bei DEUTSCH nur ein einzelnes Wort angeben!\n"
             f"Beispiele:\n"
             f"- 'el' (Artikel) → DEUTSCH: der\n"
             f"- 'la' (Artikel) → DEUTSCH: die\n"
             f"- 'de' (Präposition) → DEUTSCH: von\n"
-            f"- 'en' (Präposition) → DEUTSCH: in\n\n"
+            f"- 'en' (Präposition) → DEUTSCH: in\n"
+            f"- 'hacer' (Verb) → DEUTSCH: machen\n"
+            f"- 'estudiar' (Verb) → DEUTSCH: studieren\n\n"
             f"Antworte NUR mit diesen zwei Zeilen, keine zusätzlichen Erklärungen."
         )
         
@@ -343,23 +384,29 @@ def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=
             
             # Fallback, falls Parsing fehlschlägt
             if not deutsch:
-                deutsch = f"[{original_wort}]"
+                deutsch = f"[{wort_fuer_prompt}]"
             
             # KORREKTUR: Wenn deutsches Wort großgeschrieben ist → es ist ein Substantiv!
             # Überschreibe falsche spaCy-Klassifikation
             if deutsch and len(deutsch) > 0 and deutsch[0].isupper():
                 # Deutsche Substantive sind IMMER großgeschrieben
-                print(f"   [KORREKTUR] '{deutsch}' ist großgeschrieben → '{original_wort}' ist ein Substantiv!")
+                print(f"   [KORREKTUR] '{deutsch}' ist großgeschrieben → '{wort}' ist ein Substantiv!")
                 kategorie = "Substantive"  # Korrigiere Kategorie
                 
         except Exception as e:
-            print(f"⚠️  Fehler beim Abrufen der Übersetzung für '{original_wort}': {e}")
+            print(f"⚠️  Fehler beim Abrufen der Übersetzung für '{wort_fuer_prompt}': {e}")
             deutsch = ""
             kategorie = "Unbekannt"
         
-        # Zur CSV hinzufügen - verwende ORIGINAL_WORT statt wort
+        # Zur CSV hinzufügen - WICHTIG: Bei Verben/Adjektiven GRUNDFORM speichern!
+        # Bei Substantiven/Pronomen die Satzform
+        zu_speicherndes_wort = wort  # Standardmäßig Lemma/Grundform
+        if wortart_im_satz in ["NOUN", "PRON"]:
+            # Bei Substantiven und Pronomen: Satzform speichern (química, él)
+            zu_speicherndes_wort = satzform
+        
         neue_zeile = {
-            "Spanisch": original_wort,  # Verwende Original-Form aus dem Satz!
+            "Spanisch": zu_speicherndes_wort,  # Grundform bei Verben, Original bei Substantiven
             "Deutsch": deutsch,
             "Beispielsatz": original_satz,
             "last_repetition": heute,
@@ -406,7 +453,7 @@ def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=
         df = df[["Spanisch", "Deutsch", "Beispielsatz", "last_repetition", "Kategorie"]]
         df.to_csv(csv_datei, sep=';', index=False)
         
-        print(f"   ✓ {original_wort} → {deutsch} ({kategorie})")
+        print(f"   ✓ {zu_speicherndes_wort} → {deutsch} ({kategorie})")
     
     print(f"🆕 {len(neue_worter)} neue Vokabel(n) mit Übersetzung hinzugefügt.")
 
@@ -414,4 +461,4 @@ def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=
 if __name__ == "__main__":
 
     index = build_test_index()
-    uebersetze_und_lerne(index,satz="él estudia química.",csv_datei="../vokabeln.csv")
+    uebersetze_und_lerne(index,satz="Me gusta la manzana.",csv_datei="../vokabeln.csv")
