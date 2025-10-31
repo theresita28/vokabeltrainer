@@ -106,9 +106,9 @@ def erstelle_vokabeltest_fuer(index, kategorie_name: str, anzahl_fragen: int = 5
         ]
     )
 
-    # DEFINITION DES STRENGEN SYSTEM-PROMPTS  
+    # DEFINITION DES KREATIVEN SYSTEM-PROMPTS  
     VOKABEL_TEST_PROMPT_TEMPLATE = (
-            "Erstelle Multiple-Choice-Fragen zu einzelnen spanischen WÖRTERN.\n\n"
+            "Erstelle kreative Multiple-Choice-Fragen zu spanischen Vokabeln.\n\n"
             
             "VOKABELN (Format: spanisch – deutsch):\n"
             "{context_str}\n\n"
@@ -117,23 +117,43 @@ def erstelle_vokabeltest_fuer(index, kategorie_name: str, anzahl_fragen: int = 5
             "{spanisch_liste}\n\n"
             
             "REGELN:\n"
-            "- Erzeuge höchstens {anzahl_fragen} Fragen (oder weniger, wenn zu wenig Vokabeln vorhanden sind)\n"
-            "- Verwende AUSSCHLIESSLICH Wörter aus der spanischen Wortliste (keine erfundenen Wörter)\n"
-            "- Die Frage enthält IMMER das SPANISCHE Wort in einfachen Anführungszeichen (nie das deutsche)\n"
+            "- Erstelle genau {anzahl_fragen} Fragen\n"
+            "- Verwende NUR Wörter aus der spanischen Wortliste oben\n"
             "- Jede Frage MUSS mit 'Frage:' beginnen\n"
-            "- Frageformat: 'Frage: Was bedeutet '[spanisches Wort]' auf Deutsch?'\n"
-            "- Genau 3 Antwortmöglichkeiten: A), B), C)\n"
-            "- Die korrekte Bedeutung ist EXAKT die Form aus der Liste (keine Flexion: 'groß' statt 'großer')\n"
-            "- Falsche Antworten: plausible, thematisch passende, aber falsche deutsche Wörter\n"
-            "- Keine Zusatzzeilen außer Frage + 3 Antwortzeilen je Frage\n\n"
+            "- Das spanische Wort MUSS in einfachen Anführungszeichen stehen: 'palabra'\n\n"
             
-            "BEISPIEL (ohne Markierung):\n"
+            "KREATIVE FRAGEFORMULIERUNG (wähle für jede Frage eine andere Variante):\n"
+            "- 'Was bedeutet '[Wort]' auf Deutsch?'\n"
+            "- 'Wie übersetzt man '[Wort]' ins Deutsche?'\n"
+            "- 'Was ist die deutsche Übersetzung von '[Wort]'?'\n"
+            "- 'Welche Bedeutung hat '[Wort]'?'\n"
+            "- '[Wort]' bedeutet auf Deutsch...'\n\n"
+            
+            "ANTWORTFORMAT (STRIKT einhalten):\n"
+            "- EXAKT 3 Antwortoptionen pro Frage: A), B), C)\n"
+            "- NICHT mehr als 3 Optionen!\n"
+            "- Eine Antwort ist die EXAKTE deutsche Übersetzung aus der Vokabelliste\n"
+            "- Zwei Antworten sind falsch - erfinde plausible, thematisch passende Wörter\n"
+            "- Keine zusätzlichen Zeilen, Kommentare oder Erklärungen!\n"
+            "- Nach Option C) folgt eine Leerzeile, dann die nächste Frage\n\n"
+            
+            "BEISPIELE (beachte: NUR 3 Optionen A, B, C):\n"
             "Frage: Was bedeutet 'perro' auf Deutsch?\n"
             "A) Katze\n"
             "B) Hund\n"
-            "C) Vogel\n\n"
+            "C) Maus\n\n"
             
-            "Erstelle jetzt Fragen NUR zu Wörtern aus der spanischen Wortliste:\n"
+            "Frage: Wie übersetzt man 'rápido' ins Deutsche?\n"
+            "A) schnell\n"
+            "B) langsam\n"
+            "C) laut\n\n"
+            
+            "Frage: Welche Bedeutung hat 'casa'?\n"
+            "A) Straße\n"
+            "B) Haus\n"
+            "C) Garten\n\n"
+            
+            "Erstelle jetzt {anzahl_fragen} kreative Fragen:\n"
     )
 
     # 1. RETRIEVER ERSTELLEN UND FILTER ANWENDEN (mit größerem Top-K)
@@ -361,7 +381,47 @@ def post_process_quiz(text, correct_words):
             frage_nr -= 1  # Frage-Nummer zurücksetzen
             continue
 
-        # Speichere korrekte Antwort
+        # 3. Duplikate entfernen
+        seen = set()
+        unique_options = []
+        for letter, content in clean_options:
+            if content not in seen:
+                unique_options.append(content)  # Nur Inhalt speichern
+                seen.add(content)
+
+        # 4. MISCHE die Optionen zufällig, um die richtige Antwort nicht immer an Position A zu haben
+        import random
+        random.shuffle(unique_options)
+        
+        # 5. Finde die neue Position der korrekten Antwort nach dem Mischen
+        final_options = []
+        new_correct_letter = None
+        for idx, content in enumerate(unique_options[:3]):  # Max 3 Optionen
+            new_letter = chr(ord('A') + idx)  # A, B, C
+            final_options.append((new_letter, content))
+            
+            # Prüfe ob dies die korrekte Antwort ist
+            if content.lower().strip() == expected_deutsch.lower().strip():
+                new_correct_letter = new_letter
+            # Prüfe auch Teilübereinstimmungen (für "Zeit/Wetter")
+            elif '/' in expected_deutsch:
+                parts = [p.strip().lower() for p in expected_deutsch.split('/')]
+                if content.lower().strip() in parts:
+                    new_correct_letter = new_letter
+            # Prüfe Flexionsformen
+            elif expected_deutsch.lower().strip() in content.lower().strip() and len(content) - len(expected_deutsch) <= 2:
+                new_correct_letter = new_letter
+        
+        # Aktualisiere correct_letter auf die neue Position nach dem Mischen
+        if new_correct_letter:
+            correct_letter = new_correct_letter
+        else:
+            print(f"   [FEHLER] Frage {frage_nr}: Korrekte Antwort nach Mischen verloren! Überspringe Frage.")
+            frage_nr -= 1
+            continue
+
+        # 6. Speichere korrekte Antwort
+        # 6. Speichere korrekte Antwort
         if correct_letter and correct_answer:
             correct_answers.append({
                 "frage_nr": frage_nr,
@@ -370,17 +430,9 @@ def post_process_quiz(text, correct_words):
                 "antwort": correct_answer
             })
 
-        # 3. Duplikate entfernen
-        seen = set()
-        final_options = []
-        for letter, content in clean_options:
-            if content not in seen:
-                final_options.append((letter, content))
-                seen.add(content)
-
-        # 4. Neu zusammensetzen (OHNE Sternchen)
+        # 7. Neu zusammensetzen (OHNE Sternchen, mit gemischten Optionen)
         fixed_question = f"Frage {frage_nr}: {frage_text}\n"
-        for letter, content in final_options[:3]:  # Max 3 Optionen
+        for letter, content in final_options:
             fixed_question += f"{letter}) {content}\n"
         
         fixed_questions.append(fixed_question)
@@ -403,7 +455,7 @@ if __name__ == "__main__":
     # "Alltag", "Adjektive", "Wetter", etc.
     
     # 3. Testen der Funktion (mit korrekter Kategorie)
-    ergebnis_gut, correct_answers1 = erstelle_vokabeltest_fuer(vokabel_index, kategorie_name="Alltag")
+    ergebnis_gut, correct_answers1 = erstelle_vokabeltest_fuer(vokabel_index, kategorie_name="Adjektive")
     print("\n=== VOKABELTEST (ohne Lösungen) ===")
     print(ergebnis_gut)
     print("\n=== LÖSUNGEN (intern gespeichert) ===")
