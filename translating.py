@@ -67,11 +67,18 @@ def finde_lemma(spanisches_wort: str) -> str:
         return pronomen_mapping[wort]
 
     # 2) Wenn simplemma verfügbar → verwenden (sehr zuverlässig für Verben)
+    simplemma_result = None
     if USE_SIMPLEMMA:
         try:
-            lemma_result = simplemma.lemmatize(wort, lang='es')
-            if lemma_result and lemma_result != wort:
-                return lemma_result.lower()
+            simplemma_result = simplemma.lemmatize(wort, lang='es')
+            # Wenn simplemma eine Änderung vornimmt, vertrauen wir dem Ergebnis
+            if simplemma_result and simplemma_result != wort:
+                # Prüfe ob es ein Verb-Infinitiv ist (endet auf -ar, -er, -ir)
+                if simplemma_result.endswith(('ar', 'er', 'ir')):
+                    return simplemma_result.lower()  # Definitiv ein Verb!
+                # Auch bei anderen Änderungen vertrauen wir simplemma
+                return simplemma_result.lower()
+            # Wenn simplemma KEINE Änderung macht, weitermachen mit spaCy + Heuristik
         except Exception:
             # falls simplemma aus irgendeinem Grund versagt, fall through
             pass
@@ -81,12 +88,11 @@ def finde_lemma(spanisches_wort: str) -> str:
     try:
         doc = nlp_es(wort)
         for token in doc:
-            # Bei Substantiven/Pronomen: oft sinnvoll, Originalform beizubehalten
-            if token.pos_ == "NOUN":
-                lemma = wort  # behalte Satzform
-            elif token.pos_ == "PRON":
+            # Bei echten Pronomen: Originalform beizubehalten
+            if token.pos_ == "PRON":
                 lemma = wort
             else:
+                # Vertraue spaCy's Lemma (wird ggf. später korrigiert)
                 lemma = token.lemma_.lower()
             break
     except Exception:
@@ -96,11 +102,12 @@ def finde_lemma(spanisches_wort: str) -> str:
     if lemma in SPACY_LEMMA_KORREKTUREN:
         return SPACY_LEMMA_KORREKTUREN[lemma]
 
-    # 5) Wenn lemma == wort (spaCy hat nichts sinnvolles geliefert), heuristische Fallbacks
+    # 5) Wenn lemma == wort (weder simplemma noch spaCy half), heuristische Fallbacks
     if lemma == wort or not lemma:
         # Einfache heuristiken für gängige spanische Konjugationen:
-        if wort.endswith("o"):
-            return wort[:-1] + "ar"   # z.B. hablo-> hablar (heuristisch)
+        if wort.endswith("o") and len(wort) > 2:
+            # estudio → estudiar, hablo → hablar
+            return wort[:-1] + "ar"
         if wort.endswith(("as","a","amos","an")):
             return (wort[:-1] + "ar") if wort.endswith(("as","a")) else (wort[:-4] + "ar") if wort.endswith("amos") else wort[:-2] + "ar"
         if wort.endswith(("es","e","emos","en")):
@@ -128,7 +135,8 @@ def build_test_index():
 Settings.llm = Ollama(
     model="phi3:3.8b-mini-4k-instruct-q4_K_M",  # klein und sparsam
     temperature=0.1,
-    base_url="http://localhost:11434"
+    base_url="http://localhost:11434",
+    request_timeout=30.0  # 30 Sekunden Timeout
 )
 
 Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
@@ -157,7 +165,22 @@ def uebersetze_und_lerne(index, satz: str, csv_datei: str):
             # Substantive → Einzahl (mit simplemma falls verfügbar)
             if token.pos_ == "NOUN":
                 if USE_SIMPLEMMA:
-                    lemma = simplemma.lemmatize(wort_lower, lang='es')
+                    lemma_simplemma = simplemma.lemmatize(wort_lower, lang='es')
+                    # Fallback auf spaCy, wenn simplemma keine Änderung vornimmt
+                    if lemma_simplemma == wort_lower and token.lemma_.lower() != wort_lower:
+                        lemma = token.lemma_.lower()
+                    elif lemma_simplemma == wort_lower:
+                        # Weder simplemma noch spaCy half
+                        # Nur Heuristik anwenden wenn es WIRKLICH ein falsch klassifiziertes Verb sein könnte
+                        # Hinweis: hermano, mano, año etc. sind echte Substantive!
+                        # Nur bei bekannten Verb-Mustern: estudio, hablo, trabajo etc.
+                        bekannte_verben_auf_o = ["estudio", "trabajo", "hablo", "como", "vivo", "escribo", "leo"]
+                        if wort_lower in bekannte_verben_auf_o:
+                            lemma = wort_lower[:-1] + "ar"  # estudio → estudiar
+                        else:
+                            lemma = wort_lower  # hermano bleibt hermano
+                    else:
+                        lemma = lemma_simplemma
                 else:
                     lemma = wort_lower  # Fallback: behalte Original
             elif token.pos_ == "PRON":
@@ -165,7 +188,15 @@ def uebersetze_und_lerne(index, satz: str, csv_datei: str):
             else:
                 # Verben, Adjektive etc. → Grundform (mit simplemma falls verfügbar)
                 if USE_SIMPLEMMA:
-                    lemma = simplemma.lemmatize(wort_lower, lang='es')
+                    lemma_simplemma = simplemma.lemmatize(wort_lower, lang='es')
+                    # Fallback auf spaCy, wenn simplemma keine Änderung vornimmt
+                    if lemma_simplemma == wort_lower and token.lemma_.lower() != wort_lower:
+                        # simplemma kennt das Wort nicht → nutze spaCy (mit Korrekturen)
+                        lemma = token.lemma_.lower()
+                        if lemma in SPACY_LEMMA_KORREKTUREN:
+                            lemma = SPACY_LEMMA_KORREKTUREN[lemma]
+                    else:
+                        lemma = lemma_simplemma
                 else:
                     # Fallback: spaCy + Korrekturen
                     lemma = token.lemma_.lower()
@@ -200,13 +231,33 @@ def uebersetze_und_lerne(index, satz: str, csv_datei: str):
                 token_info_korrigiert[wort] = token_info.get(wort, "UNKNOWN")
                 neue_original_liste.append(wort)
 
-    # 3️⃣ Satzübersetzung (über LLM) - mit Original-Formen!
-    uebersetzung, erklaerung = uebersetze_mit_llm(satz, neue_original_liste if neue else [])
-
-    # 4️⃣ Neue Wörter automatisch zur CSV hinzufügen (mit korrigiertem token_info)
+    # 3️⃣ Neue Wörter automatisch zur CSV hinzufügen (mit korrigiertem token_info) 
+    # UND deutsche Übersetzungen sammeln
+    vokabel_uebersetzungen = {}  # {spanisch_satzform: deutsch}
     if neue:
-        fuege_neue_vokabeln_hinzu(csv_datei, neue, satz, token_info_korrigiert, lemma_to_satzform_map)
+        vokabel_uebersetzungen = fuege_neue_vokabeln_hinzu(csv_datei, neue, satz, token_info_korrigiert, lemma_to_satzform_map)
         print("🆕 Neue Wörter erkannt und gespeichert:", ", ".join(neue))  # Zeige Lemmas/Grundformen
+    
+    # 3.5️⃣ Hole auch Übersetzungen für bereits bekannte Wörter aus CSV
+    if vorhandene:
+        try:
+            df = pd.read_csv(csv_datei, sep=';')
+            doc_satz = nlp_es(satz)
+            for wort in vorhandene:
+                # Finde deutsche Übersetzung in CSV
+                matching = df[df['Spanisch'].astype(str).str.lower() == wort.lower()]
+                if not matching.empty:
+                    deutsch = matching.iloc[0]['Deutsch']
+                    # Finde Satzform für dieses Wort
+                    for token in doc_satz:
+                        if token.lemma_.lower() == wort.lower() or token.text.lower() == wort.lower():
+                            vokabel_uebersetzungen[token.text.lower()] = deutsch
+                            break
+        except Exception as e:
+            print(f"⚠️  Fehler beim Laden bekannter Übersetzungen: {e}")
+    
+    # 4️⃣ Satzübersetzung (über LLM) - mit Original-Formen UND deutschen Übersetzungen!
+    uebersetzung, erklaerung = uebersetze_mit_llm(satz, neue_original_liste if neue else [], vokabel_uebersetzungen)
     
     if vorhandene:
         print("✅ Bereits bekannte Wörter:", ", ".join(vorhandene))
@@ -252,7 +303,12 @@ def pruefe_vokabeln(csv_datei: str, tokens: list[str], original_satz: str = None
             # Für Substantive und Pronomen: verwende simplemma (falls verfügbar)
             if token.pos_ == "NOUN":
                 if USE_SIMPLEMMA:
-                    lemma = simplemma.lemmatize(wort_lower, lang='es')
+                    lemma_simplemma = simplemma.lemmatize(wort_lower, lang='es')
+                    # Fallback auf spaCy, wenn simplemma keine Änderung vornimmt
+                    if lemma_simplemma == wort_lower and token.lemma_.lower() != wort_lower:
+                        lemma = token.lemma_.lower()
+                    else:
+                        lemma = lemma_simplemma
                 else:
                     lemma = wort_lower
                 satz_tokens[wort_lower] = (token.pos_, lemma)
@@ -261,7 +317,12 @@ def pruefe_vokabeln(csv_datei: str, tokens: list[str], original_satz: str = None
             else:
                 # Verben, Adjektive etc.: verwende simplemma (falls verfügbar)
                 if USE_SIMPLEMMA:
-                    lemma = simplemma.lemmatize(wort_lower, lang='es')
+                    lemma_simplemma = simplemma.lemmatize(wort_lower, lang='es')
+                    # Fallback auf spaCy, wenn simplemma keine Änderung vornimmt
+                    if lemma_simplemma == wort_lower and token.lemma_.lower() != wort_lower:
+                        lemma = token.lemma_.lower()
+                    else:
+                        lemma = lemma_simplemma
                 else:
                     lemma = token.lemma_.lower()
                 satz_tokens[wort_lower] = (token.pos_, lemma)
@@ -279,9 +340,10 @@ def pruefe_vokabeln(csv_datei: str, tokens: list[str], original_satz: str = None
     return vorhandene, neue
 
 
-def uebersetze_mit_llm(satz, neue_vokabeln):
+def uebersetze_mit_llm(satz, neue_vokabeln, vokabel_uebersetzungen=None):
     """
     Übersetzt den Satz und gibt Erklärungen zu unbekannten Wörtern.
+    vokabel_uebersetzungen: Dictionary {spanisch_satzform: deutsch} für korrekte Erklärungen
     """
     prompt = (
         "Du bist ein Spanisch-Deutsch-Übersetzer und Sprachlehrer.\n"
@@ -292,6 +354,13 @@ def uebersetze_mit_llm(satz, neue_vokabeln):
     )
     if neue_vokabeln:
         prompt += f"Diese Wörter sind neu: {', '.join(neue_vokabeln)}\n"
+    
+    # Wenn deutsche Übersetzungen verfügbar sind, füge sie dem Prompt hinzu
+    if vokabel_uebersetzungen:
+        prompt += "\nBekannte Übersetzungen (VERWENDE DIESE!):\n"
+        for span, deu in vokabel_uebersetzungen.items():
+            prompt += f"- {span} = {deu}\n"
+        prompt += "\nWICHTIG: Verwende genau diese Übersetzungen in deiner Satzübersetzung und Erklärung!\n"
 
     # Direkte LLM-Abfrage ohne Index
     try:
@@ -312,8 +381,11 @@ def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=
     Fügt neue Wörter in die CSV ein mit LLM-generierten Übersetzungen und Kategorien.
     token_info: Dictionary mit {lemma: wortart_im_satz_kontext}
     lemma_to_satzform: Dictionary mit {lemma: konjugierte_form_im_satz} für bessere LLM-Prompts
+    
+    Gibt zurück: Dictionary {satzform: deutsch} für die LLM-Satzübersetzung
     """
     heute = datetime.now().strftime("%Y-%m-%d")
+    uebersetzungen = {}  # Sammle deutsche Übersetzungen für LLM
     
     # Wortart-Mapping für bessere Prompts
     WORTART_DEUTSCH = {
@@ -340,8 +412,12 @@ def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=
         # Wortart herausfinden
         wortart_deutsch = WORTART_DEUTSCH.get(wortart_im_satz, "Wort")
         
-        # Bei Verben: Verwende das LEMMA für den Prompt (Infinitiv), nicht die konjugierte Form
-        wort_fuer_prompt = wort if wortart_im_satz == "VERB" else satzform
+        # Bei Verben UND Substantiven: Verwende das LEMMA für den Prompt (Grundform/Infinitiv/Einzahl)
+        # Nur bei Pronomen/Artikeln: verwende die Satzform
+        if wortart_im_satz in ["VERB", "NOUN", "ADJ"]:
+            wort_fuer_prompt = wort  # Lemma/Grundform
+        else:
+            wort_fuer_prompt = satzform  # z.B. bei Pronomen: "él", "ella"
         
         # Spezielle Anweisungen für Verben (Infinitiv-Form verlangen)
         verb_hinweis = ""
@@ -349,21 +425,25 @@ def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=
             verb_hinweis = "\nWICHTIG: Gib bei Verben IMMER den deutschen INFINITIV an (machen, studieren, gehen)!"
         
         prompt = (
-            f"Du bist ein Spanisch-Lehrer. Übersetze das spanische Wort '{wort_fuer_prompt}' ins Deutsche.\n"
-            f"Kontext: '{original_satz}'\n\n"
-            f"WICHTIG: '{wort_fuer_prompt}' ist ein {wortart_deutsch} ({wortart_im_satz})!{verb_hinweis}\n\n"
-            f"Gib folgende Informationen zurück (genau in diesem Format):\n"
-            f"DEUTSCH: [NUR EIN deutsches Wort als Übersetzung, keine Erklärung]\n"
-            f"KATEGORIE: [passende Kategorie wie 'Alltag', 'Verben', 'Adjektive', 'Artikel', 'Präpositionen', etc.]\n\n"
-            f"Wichtig: Bei DEUTSCH nur ein einzelnes Wort angeben!\n"
+            f"Übersetze das spanische Wort '{wort_fuer_prompt}' ins Deutsche.\n"
+            f"Satz: '{original_satz}'\n\n"
+            f"Wortart: {wortart_deutsch} ({wortart_im_satz}){verb_hinweis}\n\n"
+            f"Wichtige Übersetzungsregeln:\n"
+            f"- Substantive: durazno→Pfirsich, manzana→Apfel, naranja→Orange, química→Chemie, pan→Brot, agua→Wasser\n"
+            f"- Verben (Infinitiv): comer→essen, estudiar→studieren, hacer→machen, comprar→kaufen, beber→trinken\n"
+            f"- Adjektive: rápido→schnell, grande→groß, bueno→gut, pequeño→klein\n"
+            f"- Artikel: el→der, la→die, los→die, las→die, un→ein, una→eine\n"
+            f"- Pronomen: él→er, ella→sie, yo→ich, nosotros→wir\n"
+            f"- Präpositionen: de→von, en→in, con→mit, para→für\n\n"
+            f"Antworte EXAKT in diesem Format:\n"
+            f"DEUTSCH: [ein Wort]\n"
+            f"KATEGORIE: [Themenbereich wie Essen, Wetter, Schule, Alltag, Körper, Familie, Kleidung, etc.]\n\n"
             f"Beispiele:\n"
-            f"- 'el' (Artikel) → DEUTSCH: der\n"
-            f"- 'la' (Artikel) → DEUTSCH: die\n"
-            f"- 'de' (Präposition) → DEUTSCH: von\n"
-            f"- 'en' (Präposition) → DEUTSCH: in\n"
-            f"- 'hacer' (Verb) → DEUTSCH: machen\n"
-            f"- 'estudiar' (Verb) → DEUTSCH: studieren\n\n"
-            f"Antworte NUR mit diesen zwei Zeilen, keine zusätzlichen Erklärungen."
+            f"- durazno → DEUTSCH: Pfirsich, KATEGORIE: Essen\n"
+            f"- naranja → DEUTSCH: Orange, KATEGORIE: Essen\n"
+            f"- calor → DEUTSCH: Hitze, KATEGORIE: Wetter\n"
+            f"- estudiar → DEUTSCH: studieren, KATEGORIE: Schule\n\n"
+            f"Keine Erklärungen, nur diese 2 Zeilen!"
         )
         
         try:
@@ -387,26 +467,29 @@ def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=
                 deutsch = f"[{wort_fuer_prompt}]"
             
             # KORREKTUR: Wenn deutsches Wort großgeschrieben ist → es ist ein Substantiv!
-            # Überschreibe falsche spaCy-Klassifikation
+            # (wird für Wortart-Erkennung verwendet, nicht für Kategorie)
             if deutsch and len(deutsch) > 0 and deutsch[0].isupper():
                 # Deutsche Substantive sind IMMER großgeschrieben
                 print(f"   [KORREKTUR] '{deutsch}' ist großgeschrieben → '{wort}' ist ein Substantiv!")
-                kategorie = "Substantive"  # Korrigiere Kategorie
+                # kategorie bleibt thematisch (vom LLM bestimmt)
+            
+            # Speichere Übersetzung für LLM (mit Satzform als Key)
+            uebersetzungen[satzform] = deutsch
                 
         except Exception as e:
             print(f"⚠️  Fehler beim Abrufen der Übersetzung für '{wort_fuer_prompt}': {e}")
             deutsch = ""
             kategorie = "Unbekannt"
         
-        # Zur CSV hinzufügen - WICHTIG: Bei Verben/Adjektiven GRUNDFORM speichern!
-        # Bei Substantiven/Pronomen die Satzform
+        # Zur CSV hinzufügen - WICHTIG: Grundform/Lemma speichern!
+        # Nur bei Pronomen die Satzform (wegen Akzenten: él, ella)
         zu_speicherndes_wort = wort  # Standardmäßig Lemma/Grundform
-        if wortart_im_satz in ["NOUN", "PRON"]:
-            # Bei Substantiven und Pronomen: Satzform speichern (química, él)
+        if wortart_im_satz == "PRON":
+            # Bei Pronomen: Satzform speichern (él, ella - mit Akzent)
             zu_speicherndes_wort = satzform
         
         neue_zeile = {
-            "Spanisch": zu_speicherndes_wort,  # Grundform bei Verben, Original bei Substantiven
+            "Spanisch": zu_speicherndes_wort,  # Lemma/Grundform (durazno, comer, rápido)
             "Deutsch": deutsch,
             "Beispielsatz": original_satz,
             "last_repetition": heute,
@@ -456,9 +539,11 @@ def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=
         print(f"   ✓ {zu_speicherndes_wort} → {deutsch} ({kategorie})")
     
     print(f"🆕 {len(neue_worter)} neue Vokabel(n) mit Übersetzung hinzugefügt.")
+    
+    return uebersetzungen  # Gib die Übersetzungen zurück für LLM-Satzübersetzung
 
 
 if __name__ == "__main__":
 
     index = build_test_index()
-    uebersetze_und_lerne(index,satz="Me gusta la manzana.",csv_datei="../vokabeln.csv")
+    uebersetze_und_lerne(index,satz="Yo compro duraznos frescos",csv_datei="../vokabeln.csv")
