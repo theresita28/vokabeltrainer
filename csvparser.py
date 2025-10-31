@@ -24,7 +24,7 @@ OLLAMA_BASE_URL = "http://localhost:11434"
 
 # 1. Das Modell zum GENERIEREN des Tests (LLM)
 Settings.llm = Ollama(
-    model="phi3:3.8b-mini-4k-instruct-q4_K_M",       # phi3:3.8b-mini-4k-instruct-q4_K_M llama2 old
+    model="phi3:3.8b-mini-4k-instruct-q4_K_M",       # phi3:3.8b-mini-4k-instruct-q4_K_M, llama2 old gemma:2b-instruct
     request_timeout=120.0,
     temperature=0.1,  # Niedrige Temperatur für Fakten und strikte Formatierung
     base_url=OLLAMA_BASE_URL
@@ -106,58 +106,73 @@ def erstelle_vokabeltest_fuer(index, kategorie_name: str, anzahl_fragen: int = 5
         ]
     )
 
-    # DEFINITION DES STRENGEN SYSTEM-PROMPTS
+    # DEFINITION DES STRENGEN SYSTEM-PROMPTS  
     VOKABEL_TEST_PROMPT_TEMPLATE = (
-             "Du bist ein strenger Vokabeltrainer. Verwende NUR die folgenden Vokabeln.\n"
-            "Erstelle einen Multiple-Choice-Test mit **genau {anzahl_fragen} Fragen**, "
-            "außer es stehen weniger Vokabeln zur Verfügung. "
-            "Wenn weniger Vokabeln verfügbar sind, erstelle entsprechend weniger Aufgaben.\n\n"
+            "Erstelle Multiple-Choice-Fragen zu einzelnen spanischen WÖRTERN.\n\n"
             
-            "⚠️ WICHTIG: Für **jede** Frage gelten diese Regeln strikt:\n"
-            "1. Es MUSS genau **3 Antwortmöglichkeiten (A, B, C)** geben – nicht mehr, nicht weniger.\n"
-            "2. Genau **eine** der Antwortmöglichkeiten ist korrekt.\n"
-            "3. Die korrekte Antwort MUSS mit einem Sternchen (*) am Ende markiert werden.\n"
-            "4. Alle falschen Antworten MÜSSEN ebenfalls aus den gegebenen Vokabeln stammen.\n"
-            "5. Verwende **niemals Wörter außerhalb des Kontexts**.\n\n"
-
-            "Format für jede Frage:\n"
-            "Frage: Was ist die deutsche Übersetzung von <Spanisch>?\n"
-            "A) ...\n"
-            "B) ...\n"
-            "C) ...\n"
-            "Markiere die richtige Antwort mit einem Sternchen (*).\n\n"
-
-            "KONTEXT (nur diese Vokabeln dürfen verwendet werden):\n"
-            "{context_str}\n"
-    )
-    # Den Prompt als LlamaIndex PromptTemplate vorbereiten
-    # Die Platzhalter {query_str} und {context_str} sind LlamaIndex-intern
-    # und müssen enthalten sein, aber unser Haupt-Prompt kommt als system_prompt
-    # Den Test-Prompt als string anpassen, um die Anzahl der Fragen einzufügen
-    final_test_prompt = VOKABEL_TEST_PROMPT_TEMPLATE.format(anzahl_fragen=anzahl_fragen, context_str="{context_str}")
-
-    # Den Response Synthesizer konfigurieren
-    # response_mode="compact" ist gut, um lange Texte zu vermeiden
-    # service_context wird nicht mehr direkt verwendet, Settings.llm ist der Standard
-    response_synthesizer = CompactAndRefine(
-        llm=Settings.llm, # Stellen Sie sicher, dass das Mistral-Modell hier verwendet wird
-        verbose=True, # Hilfreich zum Debuggen
-        streaming=False,
-        # Hier geben wir den Prompt als System-Prompt an
-        # LlamaIndex wird dies in der finalen Generierungsphase an das LLM übergeben
-        text_qa_template=PromptTemplate(final_test_prompt)
+            "VOKABELN (Format: spanisch – deutsch):\n"
+            "{context_str}\n\n"
+            
+            "SPANISCHE WORTLISTE (NUR diese verwenden):\n"
+            "{spanisch_liste}\n\n"
+            
+            "REGELN:\n"
+            "- Erzeuge höchstens {anzahl_fragen} Fragen (oder weniger, wenn zu wenig Vokabeln vorhanden sind)\n"
+            "- Verwende AUSSCHLIESSLICH Wörter aus der spanischen Wortliste (keine erfundenen Wörter)\n"
+            "- Die Frage enthält IMMER das SPANISCHE Wort in einfachen Anführungszeichen (nie das deutsche)\n"
+            "- Jede Frage MUSS mit 'Frage:' beginnen\n"
+            "- Frageformat: 'Frage: Was bedeutet '[spanisches Wort]' auf Deutsch?'\n"
+            "- Genau 3 Antwortmöglichkeiten: A), B), C)\n"
+            "- Die korrekte Bedeutung ist EXAKT die Form aus der Liste (keine Flexion: 'groß' statt 'großer')\n"
+            "- Falsche Antworten: plausible, thematisch passende, aber falsche deutsche Wörter\n"
+            "- Keine Zusatzzeilen außer Frage + 3 Antwortzeilen je Frage\n\n"
+            
+            "BEISPIEL (ohne Markierung):\n"
+            "Frage: Was bedeutet 'perro' auf Deutsch?\n"
+            "A) Katze\n"
+            "B) Hund\n"
+            "C) Vogel\n\n"
+            
+            "Erstelle jetzt Fragen NUR zu Wörtern aus der spanischen Wortliste:\n"
     )
 
-    # 1. RETRIEVER ERSTELLEN UND FILTER ANWENDEN
-    # Wir erstellen den Retriever direkt aus dem Index und übergeben den Metadaten-Filter.
+    # 1. RETRIEVER ERSTELLEN UND FILTER ANWENDEN (mit größerem Top-K)
+    dynamic_top_k = max(anzahl_fragen * 5, 25)
     retriever = index.as_retriever(
-        filters=kategorie_filter, # <--- Der Filter wird hier angewendet
-        similarity_top_k=5        #old 20, max(anzahl_fragen * 2, 10)?
+        filters=kategorie_filter,
+        similarity_top_k=dynamic_top_k
     )
 
     # 2. RETRIEVAL TESTEN (DEBUGGING)
     # Führen Sie den Retrieval-Teil separat aus, um die Nodes zu sehen.
     retrieved_nodes = retriever.retrieve(f"Vokabeln für Test in Kategorie {kategorie_name}")
+
+    # Einzigartige Vokabeln speichern: (Spanisch, Deutsch)
+    unique_vokabeln = []
+    for node_with_score in retrieved_nodes:
+        text = node_with_score.node.text
+        try:
+            spanisch = text.split("Spanisch:")[1].split("\n")[0].strip()
+            deutsch = text.split("Deutsch:")[1].split("\n")[0].strip()
+            
+            # Filter: Ignoriere Metadaten-Artefakte
+            if spanisch.lower() in ["kategorie_filter", "kategorie", "metadata"]:
+                continue
+            if deutsch.lower() in ["kategorie_filter", "kategorie", "metadata"]:
+                continue
+            
+            if (spanisch, deutsch) not in unique_vokabeln:
+                unique_vokabeln.append((spanisch, deutsch))
+        except IndexError:
+            continue
+
+    # Context-String für den Prompt (nur echte Vokabeln)
+    context_str = "\n".join([f"{s} – {d}" for s, d in unique_vokabeln])
+
+    print(f"\n--- UNIQUE VOKABELN für LLM ---")
+    for s, d in unique_vokabeln:
+        print(f"  {s} – {d}")
+    print("--- ENDE VOKABELN ---")
 
     print(f"\n--- DEBUGGING: Abgerufene Nodes für Kategorie '{kategorie_name}' ---")
     if not retrieved_nodes:
@@ -171,10 +186,30 @@ def erstelle_vokabeltest_fuer(index, kategorie_name: str, anzahl_fragen: int = 5
             print(f"    Ähnlichkeitsscore: {node_with_score.score:.2f}")
     print("--- ENDE DEBUGGING ---")
 
+    # Spanische Wortliste vorbereiten (für striktere Anweisung im Prompt)
+    spanisch_liste_text = ", ".join([s for s, _ in unique_vokabeln]) or "(leer)"
+
+    # Anzahl Fragen effektiv (maximal so viele wie Vokabeln vorhanden)
+    anzahl_fragen_eff = min(anzahl_fragen, len(unique_vokabeln))
+
+    # Den Prompt final zusammenstellen (Context kommt vom Retriever via {context_str})
+    final_test_prompt = VOKABEL_TEST_PROMPT_TEMPLATE.format(
+        anzahl_fragen=anzahl_fragen_eff,
+        context_str="{context_str}",
+        spanisch_liste=spanisch_liste_text
+    )
+
+    # Den Response Synthesizer konfigurieren (nachdem wir die Wortliste kennen)
+    response_synthesizer = CompactAndRefine(
+        llm=Settings.llm,
+        verbose=True,
+        streaming=False,
+        text_qa_template=PromptTemplate(final_test_prompt)
+    )
+
     # 3. QUERY ENGINE ERSTELLEN UND AUSFÜHREN
-    # Wir verwenden den bereits gefilterten Retriever, um die Generierung auszuführen.
     query_engine = RetrieverQueryEngine(
-        retriever=retriever, 
+        retriever=retriever,
         response_synthesizer=response_synthesizer
     )
 
@@ -186,14 +221,172 @@ def erstelle_vokabeltest_fuer(index, kategorie_name: str, anzahl_fragen: int = 5
     ) """
 
     # Die allgemeine Abfrage, die das LLM zur Generierung nutzt
-    abfrage = f"Erstelle {anzahl_fragen} Vokabeltestfragen zur Kategorie {kategorie_name}."
+    abfrage = f"Erstelle {anzahl_fragen_eff} Vokabeltestfragen zur Kategorie {kategorie_name}."
     
     try:
         response = query_engine.query(abfrage)
-        return response.response
-    except Exception as e:
-        return f"Fehler bei der Abfrage: {e}"
+        raw_response = response.response
+        
+        # Debugging: Zeige Raw-Response
+        print("\n=== DEBUG: RAW LLM RESPONSE ===")
+        print(raw_response[:500])  # Erste 500 Zeichen
+        print("=== END DEBUG ===\n")
 
+        # Post-processing: Extrahiere Lösungen und entferne Sternchen aus dem Test
+        final_test, correct_answers = post_process_quiz(raw_response, unique_vokabeln)
+
+        # Gebe Test OHNE Lösungen und separate Lösungsliste zurück
+        return final_test, correct_answers
+    except Exception as e:
+        return f"Fehler bei der Abfrage: {e}", []
+
+def post_process_quiz(text, correct_words):
+    """
+    Verarbeitet den generierten Test:
+    1. Extrahiert die korrekten Antworten (mit Sternchen markiert)
+    2. Validiert gegen correct_words
+    3. Gibt Test OHNE Sternchen + Liste der korrekten Antworten zurück
+    """
+    import re
+    
+    # Normalize: Falls kein "Frage:" verwendet wurde, konvertiere Zeilen, die mit
+    # "Was bedeutet" beginnen, zu unserem Standardformat mit "Frage: "-Präfix.
+    normalized_text = re.sub(r'^(\s*)(Was bedeutet)', r'\1Frage: \2', text.strip(), flags=re.MULTILINE)
+
+    # Split bei "Frage:" aber behalte das Wort bei
+    questions = re.split(r'(Frage:)', normalized_text)
+    fixed_questions = []
+    correct_answers = []
+
+    frage_nr = 0
+    for i in range(1, len(questions), 2):  # Paare: "Frage:" + Text
+        if i+1 >= len(questions):
+            break
+            
+        frage_text_teil = questions[i+1].strip()
+        if not frage_text_teil:
+            continue
+        
+        # Extrahiere Fragetext (bis erste Antwort)
+        frage_zeilen = frage_text_teil.split("\n")
+        frage_text = frage_zeilen[0].strip() if frage_zeilen else ""
+        
+        # VALIDIERUNG: Prüfe ob die gefragte Vokabel in correct_words ist
+        # Extrahiere spanisches Wort aus Fragetext (z.B. aus "Was bedeutet 'pequeño' auf Deutsch?")
+        import re as re_module
+        # Erlaube sowohl einfache als auch doppelte Anführungszeichen
+        spanish_word_match = re_module.search(r"[\"']([^\"']+)[\"']", frage_text)
+        spanish_word = None
+        expected_deutsch = None
+        
+        if spanish_word_match:
+            spanish_word = spanish_word_match.group(1)
+            # Finde die erwartete deutsche Übersetzung aus correct_words
+            for s, d in correct_words:
+                if s.lower() == spanish_word.lower():
+                    expected_deutsch = d
+                    break
+            
+            # Wenn das Wort nicht in correct_words ist, überspringe die Frage
+            if not expected_deutsch:
+                print(f"   [WARNUNG] Frage '{frage_text}' fragt nach '{spanish_word}', das NICHT in den Vokabeln ist! Überspringe Frage.")
+                continue
+        else:
+            print(f"   [WARNUNG] Konnte kein spanisches Wort in Frage '{frage_text}' extrahieren! Überspringe Frage.")
+            continue
+        
+        frage_nr += 1
+        
+        # Extrahiere Antwortoptionen (A), B), C) mit/ohne Sternchen)
+        options = re.findall(r'^\s*([ABC])\)\s*(.+?)\s*$', frage_text_teil, re.MULTILINE)
+        
+        if not options:
+            continue
+
+        # 1. Finde markierte Antworten und säubere sie
+        starred_options = []
+        clean_options = []
+        
+        for letter, opt in options:
+            # Entferne Sternchen und Whitespace
+            content = re.sub(r'\*+', '', opt).strip()
+            is_correct = '*' in opt
+            
+            if is_correct:
+                starred_options.append((letter, content))
+            
+            clean_options.append((letter, content))
+
+        # 2. Die KORREKTE Antwort kommt IMMER aus der CSV (expected_deutsch)
+        # Suche die Option, die der expected_deutsch entspricht
+        correct_letter = None
+        correct_answer = expected_deutsch  # DIE KORREKTE ANTWORT AUS DER CSV!
+        
+        # Suche welche Option der korrekten Antwort am nächsten kommt
+        best_match_letter = None
+        best_match_score = 0
+        
+        for letter, opt in clean_options:
+            opt_lower = opt.lower().strip()
+            expected_lower = expected_deutsch.lower().strip()
+            
+            # Exakte Übereinstimmung - perfekt!
+            if opt_lower == expected_lower:
+                correct_letter = letter
+                break
+            
+            # Teilübereinstimmung bei Mehrfachübersetzungen (z.B. "Zeit" in "Zeit/Wetter")
+            if '/' in expected_lower:
+                parts = [p.strip() for p in expected_lower.split('/')]
+                if opt_lower in parts:
+                    correct_letter = letter
+                    correct_answer = opt  # Verwende die vom LLM gewählte Teilübersetzung
+                    break
+            
+            # Prüfe Flexionsformen (z.B. "klein" in "kleiner")
+            if expected_lower in opt_lower and len(opt_lower) - len(expected_lower) <= 2:
+                # Nur wenn die Abweichung klein ist (max 2 Zeichen für Endungen wie -er, -es)
+                if len(opt_lower) - len(expected_lower) > best_match_score:
+                    best_match_letter = letter
+                    best_match_score = len(opt_lower) - len(expected_lower)
+        
+        # Wenn keine exakte Übereinstimmung gefunden wurde, verwende den besten Match
+        if not correct_letter and best_match_letter:
+            correct_letter = best_match_letter
+            print(f"   [INFO] Frage {frage_nr}: Verwende Flexionsform '{clean_options[ord(best_match_letter)-ord('A')][1]}' für '{expected_deutsch}'")
+        
+        # Wenn immer noch nichts gefunden wurde, ist die Frage ungültig
+        if not correct_letter:
+            print(f"   [FEHLER] Frage {frage_nr}: Konnte '{expected_deutsch}' in keiner Antwort finden! Überspringe Frage.")
+            frage_nr -= 1  # Frage-Nummer zurücksetzen
+            continue
+
+        # Speichere korrekte Antwort
+        if correct_letter and correct_answer:
+            correct_answers.append({
+                "frage_nr": frage_nr,
+                "frage_text": frage_text,
+                "buchstabe": correct_letter,
+                "antwort": correct_answer
+            })
+
+        # 3. Duplikate entfernen
+        seen = set()
+        final_options = []
+        for letter, content in clean_options:
+            if content not in seen:
+                final_options.append((letter, content))
+                seen.add(content)
+
+        # 4. Neu zusammensetzen (OHNE Sternchen)
+        fixed_question = f"Frage {frage_nr}: {frage_text}\n"
+        for letter, content in final_options[:3]:  # Max 3 Optionen
+            fixed_question += f"{letter}) {content}\n"
+        
+        fixed_questions.append(fixed_question)
+
+    final_test = "\n".join(fixed_questions)
+    return final_test, correct_answers
 
 # --- 4. HAUPTPROGRAMM ---
 if __name__ == "__main__":
@@ -210,12 +403,20 @@ if __name__ == "__main__":
     # "Alltag", "Adjektive", "Wetter", etc.
     
     # 3. Testen der Funktion (mit korrekter Kategorie)
-    ergebnis_gut = erstelle_vokabeltest_fuer(vokabel_index, kategorie_name="Zeit")  #Alltag/Adjektive gut
+    ergebnis_gut, correct_answers1 = erstelle_vokabeltest_fuer(vokabel_index, kategorie_name="Alltag")
+    print("\n=== VOKABELTEST (ohne Lösungen) ===")
     print(ergebnis_gut)
+    print("\n=== LÖSUNGEN (intern gespeichert) ===")
+    for ans in correct_answers1:
+        print(f"Frage {ans['frage_nr']}: {ans['buchstabe']}) {ans['antwort']}")
 
     print("\n" + "="*50 + "\n")
 
     # 4. Testen des Filters (mit nicht existierender Kategorie)
-    # Sollte den Abbruch-Prompt aus dem System-Prompt auslösen
-    ergebnis_schlecht = erstelle_vokabeltest_fuer(vokabel_index, kategorie_name="Chemie")
+    ergebnis_schlecht, correct_answers2 = erstelle_vokabeltest_fuer(vokabel_index, kategorie_name="Chemie")
+    print("\n=== VOKABELTEST (ohne Lösungen) ===")
     print(ergebnis_schlecht)
+    if correct_answers2:
+        print("\n=== LÖSUNGEN (intern gespeichert) ===")
+        for ans in correct_answers2:
+            print(f"Frage {ans['frage_nr']}: {ans['buchstabe']}) {ans['antwort']}")
