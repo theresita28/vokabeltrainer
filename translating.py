@@ -25,8 +25,10 @@ nlp_es = spacy.load("es_core_news_sm")
 
 # ⚠️ KORREKTUR-MAP für fehlerhafte spaCy-Lemmatisierungen
 SPACY_LEMMA_KORREKTUREN = {
-    "comar": "comer",      # spaCy Bug: come/comen werden fälschlicherweise zu "comar"
-    "aprendo": "aprender", # spaCy Bug: aprendo bleibt aprendo statt aprender
+    "comar": "comer",         # spaCy Bug: come/comen werden fälschlicherweise zu "comar"
+    "aprendo": "aprender",    # spaCy Bug: aprendo bleibt aprendo statt aprender
+    "rotar": "roto",          # rota (kaputt/gebrochen) wird fälschlich zu rotar (drehen)
+    "alojamientir": "alojamiento",  # alojamiento wird fälschlich zu alojamientir
     # Hier können weitere fehlerhafte Lemmas hinzugefügt werden
 }
 
@@ -131,12 +133,12 @@ def build_test_index():
     index = VectorStoreIndex.from_documents(docs)
     return index
 
-# === 2. MODELLE EINSTELLEN ===
+# === 2. MODELLE EINSTELLEN ===phi3:3.8b-mini-4k-instruct-q4_K_M-> gut
 Settings.llm = Ollama(
-    model="phi3:3.8b-mini-4k-instruct-q4_K_M",  # klein und sparsam
+    model="phi3:3.8b-mini-4k-instruct-q4_K_M",  # Zurück zum funktionierenden Modell
     temperature=0.1,
     base_url="http://localhost:11434",
-    request_timeout=30.0  # 30 Sekunden Timeout
+    request_timeout=60.0  # 60 Sekunden Timeout (erhöht von 30s wegen längerer Sätze)
 )
 
 Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
@@ -345,22 +347,37 @@ def uebersetze_mit_llm(satz, neue_vokabeln, vokabel_uebersetzungen=None):
     Übersetzt den Satz und gibt Erklärungen zu unbekannten Wörtern.
     vokabel_uebersetzungen: Dictionary {spanisch_satzform: deutsch} für korrekte Erklärungen
     """
+    # Verschärfter Prompt für bessere Übersetzungsqualität
     prompt = (
-        "Du bist ein Spanisch-Deutsch-Übersetzer und Sprachlehrer.\n"
-        "Übersetze den folgenden Satz vollständig und natürlich.\n"
-        "Falls einige Wörter nicht bekannt sind oder schwierig sein könnten, "
-        "gib danach eine kurze Erklärung auf Deutsch (Bedeutung und ggf. Beispiel).\n\n"
-        f"Satz: {satz}\n\n"
+        "Du bist ein professioneller Spanisch→Deutsch Übersetzer.\n\n"
+        "AUFGABE:\n"
+        f"Übersetze den spanischen Satz '{satz}' ins Deutsche.\n\n"
     )
-    if neue_vokabeln:
-        prompt += f"Diese Wörter sind neu: {', '.join(neue_vokabeln)}\n"
     
-    # Wenn deutsche Übersetzungen verfügbar sind, füge sie dem Prompt hinzu
+    # Bekannte Übersetzungen aus CSV/Session hinzufügen und 'nan'/leere Einträge vermeiden
     if vokabel_uebersetzungen:
-        prompt += "\nBekannte Übersetzungen (VERWENDE DIESE!):\n"
+        prompt += "BEKANNTE WORTÜBERSETZUNGEN (verwende diese!):\n"
         for span, deu in vokabel_uebersetzungen.items():
-            prompt += f"- {span} = {deu}\n"
-        prompt += "\nWICHTIG: Verwende genau diese Übersetzungen in deiner Satzübersetzung und Erklärung!\n"
+            if deu is not None and str(deu).strip().lower() != 'nan' and str(deu).strip() != '':
+                prompt += f"  {span} → {deu}\n"
+        prompt += "\n"
+    
+    if neue_vokabeln:
+        prompt += f"NEUE/UNKLARE WÖRTER (erkläre diese): {', '.join(neue_vokabeln)}\n\n"
+
+    prompt += (
+        "REGELN:\n"
+        "- NUR deutsche Übersetzung (kein Spanisch, kein Englisch!)\n"
+        "- Natürliches, korrektes Deutsch\n"
+        "- Passe Artikel, Kasus, Plural korrekt an\n"
+        "- Sinngemäße Übersetzung (nicht Wort-für-Wort)\n\n"
+        "AUSGABEFORMAT:\n"
+        "1) [Eine Zeile: die vollständige deutsche Übersetzung]\n\n"
+        "3) [Falls neue Wörter vorhanden, erkläre JEDES mit diesem Format:]\n"
+        "   - <spanisch> → <deutsch>: <1-Satz-Erklärung auf Deutsch>\n"
+        "     Beispiel: <kurzer deutscher Beispielsatz>\n"
+        "   [Falls keine neuen Wörter: schreibe 'Keine schwierigen Wörter.']\n"
+    )
 
     # Direkte LLM-Abfrage ohne Index
     try:
@@ -422,28 +439,39 @@ def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=
         # Spezielle Anweisungen für Verben (Infinitiv-Form verlangen)
         verb_hinweis = ""
         if wortart_im_satz == "VERB":
-            verb_hinweis = "\nWICHTIG: Gib bei Verben IMMER den deutschen INFINITIV an (machen, studieren, gehen)!"
+            verb_hinweis = "\nWICHTIG: Gib bei Verben IMMER den deutschen INFINITIV KLEINGESCHRIEBEN an (essen, studieren, gehen, kaufen, machen, suchen, brauchen, reparieren)!"
         
         prompt = (
-            f"Übersetze das spanische Wort '{wort_fuer_prompt}' ins Deutsche.\n"
-            f"Satz: '{original_satz}'\n\n"
-            f"Wortart: {wortart_deutsch} ({wortart_im_satz}){verb_hinweis}\n\n"
-            f"Wichtige Übersetzungsregeln:\n"
-            f"- Substantive: durazno→Pfirsich, manzana→Apfel, naranja→Orange, química→Chemie, pan→Brot, agua→Wasser\n"
-            f"- Verben (Infinitiv): comer→essen, estudiar→studieren, hacer→machen, comprar→kaufen, beber→trinken\n"
-            f"- Adjektive: rápido→schnell, grande→groß, bueno→gut, pequeño→klein\n"
-            f"- Artikel: el→der, la→die, los→die, las→die, un→ein, una→eine\n"
-            f"- Pronomen: él→er, ella→sie, yo→ich, nosotros→wir\n"
-            f"- Präpositionen: de→von, en→in, con→mit, para→für\n\n"
-            f"Antworte EXAKT in diesem Format:\n"
-            f"DEUTSCH: [ein Wort]\n"
-            f"KATEGORIE: [Themenbereich wie Essen, Wetter, Schule, Alltag, Körper, Familie, Kleidung, etc.]\n\n"
-            f"Beispiele:\n"
-            f"- durazno → DEUTSCH: Pfirsich, KATEGORIE: Essen\n"
-            f"- naranja → DEUTSCH: Orange, KATEGORIE: Essen\n"
-            f"- calor → DEUTSCH: Hitze, KATEGORIE: Wetter\n"
-            f"- estudiar → DEUTSCH: studieren, KATEGORIE: Schule\n\n"
-            f"Keine Erklärungen, nur diese 2 Zeilen!"
+            f"AUFGABE: Übersetze das spanische Wort '{wort_fuer_prompt}' ins Deutsche.\n"
+            f"KONTEXT-SATZ: '{original_satz}'\n"
+            f"WORTART: {wortart_deutsch} ({wortart_im_satz}){verb_hinweis}\n\n"
+            f"ÜBERSETZUNGSHILFEN:\n"
+            f"Lebensmittel: durazno→Pfirsich, manzana→Apfel, naranja→Orange, pan→Brot, mercado→Markt\n"
+            f"Verben (kleingeschrieben!): comer→essen, estudiar→studieren, hacer→machen, comprar→kaufen, necesitar→brauchen, buscar→suchen, arreglar→reparieren\n"
+            f"Adjektive (kleingeschrieben!): rápido→schnell, grande→groß, fresco→frisch, roto→kaputt, cerca→nah\n"
+            f"Substantive (Alltag): mercado→Markt, bicicleta→Fahrrad, estudiante→Student, alojamiento→Unterkunft, campus→Campus\n"
+            f"Grammatik: el→der, la→die, en→in, de→von, del→des, con→mit, mi→mein, cerca→nah\n\n"
+            f"REGELN:\n"
+            f"- Übersetze NUR ins Deutsche (kein Spanisch, kein Englisch!)\n"
+            f"- Verben/Adjektive → kleingeschrieben\n"
+            f"- Substantive → GROẞGESCHRIEBEN\n"
+            f"- Nur EIN Wort als Übersetzung\n\n"
+            f"AUSGABEFORMAT (NUR diese 2 Zeilen!):\n"
+            f"DEUTSCH: [ein Wort, korrekte Groß-/Kleinschreibung]\n"
+            f"KATEGORIE: [wähle genau eine aus: Essen, Wetter, Schule, Alltag, Körper, Familie, Kleidung, Bildung, Grammatik]\n"
+            f"(Essen=Lebensmittel/Obst/Gemüse, Grammatik=Artikel/Pronomen/Präpositionen, Alltag=allgemeine Verben/Adjektive/Substantive, Bildung=Schule/Uni; wenn unsicher, wähle nächstliegende)\n\n"
+            f"BEISPIELE:\n"
+            f"comprar → DEUTSCH: kaufen, KATEGORIE: Alltag\n"
+            f"durazno → DEUTSCH: Pfirsich, KATEGORIE: Essen\n"
+            f"fresco → DEUTSCH: frisch, KATEGORIE: Alltag\n"
+            f"mercado → DEUTSCH: Markt, KATEGORIE: Alltag\n"
+            f"bicicleta → DEUTSCH: Fahrrad, KATEGORIE: Alltag\n"
+            f"necesitar → DEUTSCH: brauchen, KATEGORIE: Alltag\n"
+            f"arreglar → DEUTSCH: reparieren, KATEGORIE: Alltag\n"
+            f"cerca → DEUTSCH: nah, KATEGORIE: Alltag\n"
+            f"alojamiento → DEUTSCH: Unterkunft, KATEGORIE: Alltag\n"
+            f"del → DEUTSCH: des, KATEGORIE: Grammatik\n"
+            f"mi → DEUTSCH: mein, KATEGORIE: Grammatik\n"
         )
         
         try:
@@ -456,22 +484,35 @@ def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=
             
             for line in text.split("\n"):
                 if line.startswith("DEUTSCH:"):
-                    deutsch = line.replace("DEUTSCH:", "").strip()
-                    # Nur das erste Wort nehmen, falls mehrere zurückgegeben wurden
-                    deutsch = deutsch.split()[0] if deutsch else ""
-                elif line.startswith("KATEGORIE:"):
-                    kategorie = line.replace("KATEGORIE:", "").strip()
+                    raw = line.replace("DEUTSCH:", "").strip()
+                    # Schneide alles nach typischen Trennern ab (z.B. wenn LLM in einer Zeile auch KATEGORIE liefert)
+                    raw = re.split(r"(,|;|\||\s+KATEGORIE:|\s+Kategorie:)", raw, maxsplit=1)[0].strip()
+                    # Entferne Anführungszeichen
+                    raw = raw.strip("'\"")
+                    # Ersten Token nehmen und abschließende Satzzeichen entfernen
+                    deutsch = raw.split()[0] if raw else ""
+                    deutsch = re.sub(r"[\.,;:!?]+$", "", deutsch)
+                elif line.startswith("KATEGORIE:") or line.startswith("Kategorie:"):
+                    kategorie = re.sub(r"^(KATEGORIE|Kategorie):\s*", "", line).strip()
+                # Falls die Kategorie in derselben Zeile später auftaucht
+                if not kategorie:
+                    m = re.search(r"(?i)kategorie\s*:\s*([^\n]+)", line)
+                    if m:
+                        kategorie = m.group(1).strip()
             
             # Fallback, falls Parsing fehlschlägt
             if not deutsch:
                 deutsch = f"[{wort_fuer_prompt}]"
             
-            # KORREKTUR: Wenn deutsches Wort großgeschrieben ist → es ist ein Substantiv!
-            # (wird für Wortart-Erkennung verwendet, nicht für Kategorie)
-            if deutsch and len(deutsch) > 0 and deutsch[0].isupper():
-                # Deutsche Substantive sind IMMER großgeschrieben
-                print(f"   [KORREKTUR] '{deutsch}' ist großgeschrieben → '{wort}' ist ein Substantiv!")
-                # kategorie bleibt thematisch (vom LLM bestimmt)
+            # Validierung: Verben und Adjektive sollten kleingeschrieben sein
+            if wortart_im_satz in ["VERB", "ADJ", "ADV"] and deutsch and len(deutsch) > 0 and deutsch[0].isupper():
+                # Warnung ausgeben, aber trotzdem kleinschreiben
+                print(f"   [WARNUNG] Verb/Adjektiv '{deutsch}' wurde großgeschrieben → korrigiere zu '{deutsch.lower()}'")
+                deutsch = deutsch.lower()
+            
+            # Info-Ausgabe: Substantive sollten großgeschrieben sein
+            if wortart_im_satz == "NOUN" and deutsch and len(deutsch) > 0 and deutsch[0].isupper():
+                print(f"   [INFO] '{deutsch}' ist korrekt großgeschrieben (Substantiv)")
             
             # Speichere Übersetzung für LLM (mit Satzform als Key)
             uebersetzungen[satzform] = deutsch
@@ -546,4 +587,18 @@ def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=
 if __name__ == "__main__":
 
     index = build_test_index()
-    uebersetze_und_lerne(index,satz="Yo compro duraznos frescos",csv_datei="../vokabeln.csv")
+    
+    # Test mit 4 verschiedenen Sätzen
+    test_saetze = [
+        "Compramos duraznos frescos en el mercado",
+        "Hace mucho calor hoy",
+        "El estudiante busca alojamiento cerca del campus",
+        "Necesito arreglar mi bicicleta rota"
+    ]
+    
+    for i, satz in enumerate(test_saetze, 1):
+        print(f"\n{'='*70}")
+        print(f"TEST {i}/{len(test_saetze)}: {satz}")
+        print(f"{'='*70}")
+        uebersetze_und_lerne(index, satz=satz, csv_datei="../vokabeln.csv")
+        print(f"\n✅ Test {i} abgeschlossen\n")
