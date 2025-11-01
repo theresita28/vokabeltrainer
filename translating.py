@@ -32,6 +32,23 @@ SPACY_LEMMA_KORREKTUREN = {
     # Hier können weitere fehlerhafte Lemmas hinzugefügt werden
 }
 
+# Korrekturen für häufig fehlende Akzente (Normalisierung auf kanonische Form)
+DIACRITIC_KORREKTUREN = {
+    "futbol": "fútbol",
+    "arbol": "árbol",
+    "camion": "camión",
+    "nino": "niño",
+    "nin\u00f3": "niño",  # falls falsch kodiert
+    "telefono": "teléfono",
+    "lampara": "lámpara",
+    "cafeteria": "cafetería",
+}
+
+def korrigiere_akzente(wort: str) -> str:
+    if not wort:
+        return wort
+    return DIACRITIC_KORREKTUREN.get(wort, wort)
+
 def finde_lemma(spanisches_wort: str) -> str:
     """
     Robust: Verwende pattern.es, falls verfügbar; sonst spaCy + Korrekturen + Heuristik.
@@ -205,6 +222,8 @@ def uebersetze_und_lerne(index, satz: str, csv_datei: str):
                     if lemma in SPACY_LEMMA_KORREKTUREN:
                         lemma = SPACY_LEMMA_KORREKTUREN[lemma]
             
+            # Akzent-Korrekturen anwenden (z.B. futbol -> fútbol)
+            lemma = korrigiere_akzente(lemma)
             tokens.append(lemma)
             token_info[lemma] = token.pos_  # Speichere Wortart mit Lemma als Schlüssel
 
@@ -269,11 +288,20 @@ def uebersetze_und_lerne(index, satz: str, csv_datei: str):
         print("✅ Alle Wörter waren bereits bekannt.")
 
     # 5️⃣ Ausgabe
-    print("\n--- Übersetzung ---")
+    print("\n" + "="*70)
+    print("📖 ÜBERSETZUNG:")
+    print("="*70)
     print(uebersetzung)
-    if erklaerung:
-        print("\n--- Neue Vokabeln erklärt ---")
-        print(erklaerung)
+    
+    if neue:
+        print("\n" + "="*70)
+        print(f"📚 NEUE VOKABELN ERKLÄRT ({len(neue)} Wörter):")
+        print("="*70)
+        if erklaerung and erklaerung.strip():
+            print(erklaerung)
+        else:
+            print("⚠️ Keine Erklärung vom LLM erhalten.")
+            print(f"Neue Wörter: {', '.join(neue)}")
     
     return uebersetzung
 
@@ -290,7 +318,7 @@ def pruefe_vokabeln(csv_datei: str, tokens: list[str], original_satz: str = None
         df = pd.read_csv(csv_datei, sep=';')
     except FileNotFoundError:
         print(f"⚠️  Datei '{csv_datei}' nicht gefunden – es wird angenommen, dass keine Vokabeln existieren.")
-        df = pd.DataFrame(columns=["Spanisch", "Deutsch", "Kategorie", "Beispielsatz", "last_repetition"])
+        df = pd.DataFrame(columns=["Spanisch", "Deutsch", "Kategorie", "Beispielsatz", "letzte Wiederholung"])
 
     vorhandene = []
     neue = []
@@ -363,21 +391,30 @@ def uebersetze_mit_llm(satz, neue_vokabeln, vokabel_uebersetzungen=None):
         prompt += "\n"
     
     if neue_vokabeln:
-        prompt += f"NEUE/UNKLARE WÖRTER (erkläre diese): {', '.join(neue_vokabeln)}\n\n"
+        prompt += f"NEUE/UNKLARE WÖRTER (erkläre diese detailliert): {', '.join(neue_vokabeln)}\n\n"
 
     prompt += (
         "REGELN:\n"
-        "- NUR deutsche Übersetzung (kein Spanisch, kein Englisch!)\n"
-        "- Natürliches, korrektes Deutsch\n"
-        "- Passe Artikel, Kasus, Plural korrekt an\n"
-        "- Sinngemäße Übersetzung (nicht Wort-für-Wort)\n\n"
+        "- Gib zuerst NUR die deutsche Übersetzung als eine einzelne Zeile aus (ohne Label).\n"
+        "- NUR Deutsch in der Übersetzung (kein Spanisch, kein Englisch).\n"
+        "- Natürliches, korrektes Deutsch; Artikel/Kasus/Plural anpassen.\n"
+        "- Sinngemäß übersetzen (nicht Wort-für-Wort).\n\n"
         "AUSGABEFORMAT:\n"
-        "1) [Eine Zeile: die vollständige deutsche Übersetzung]\n\n"
-        "3) [Falls neue Wörter vorhanden, erkläre JEDES mit diesem Format:]\n"
-        "   - <spanisch> → <deutsch>: <1-Satz-Erklärung auf Deutsch>\n"
-        "     Beispiel: <kurzer deutscher Beispielsatz>\n"
-        "   [Falls keine neuen Wörter: schreibe 'Keine schwierigen Wörter.']\n"
+        "[Die vollständige deutsche Übersetzung des Satzes]\n\n"
     )
+    
+    if neue_vokabeln:
+        prompt += (
+            "Danach (nach einer Leerzeile) erkläre JEDES neue Wort GENAU in diesem Format:\n"
+            "- <spanisch> → <deutsch>: <1-Satz-Erklärung AUF DEUTSCH>\n"
+            "  Beispiel (auf Spanisch): <kurzer spanischer Beispielsatz mit dem Wort>\n"
+            "WICHTIG:\n"
+            "- Verwende links NUR Spanisch (Lemma/Satzform), rechts NUR Deutsch.\n"
+            "- Beispiele sind IMMER AUF SPANISCH.\n"
+            "- Erkläre wirklich ALLE neuen Wörter jeweils in einer eigenen Zeile.\n\n"
+        )
+    else:
+        prompt += "Da alle Wörter bekannt sind, gib nur die Übersetzung aus.\n\n"
 
     # Direkte LLM-Abfrage ohne Index
     try:
@@ -449,29 +486,51 @@ def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=
             f"Lebensmittel: durazno→Pfirsich, manzana→Apfel, naranja→Orange, pan→Brot, mercado→Markt\n"
             f"Verben (kleingeschrieben!): comer→essen, estudiar→studieren, hacer→machen, comprar→kaufen, necesitar→brauchen, buscar→suchen, arreglar→reparieren\n"
             f"Adjektive (kleingeschrieben!): rápido→schnell, grande→groß, fresco→frisch, roto→kaputt, cerca→nah\n"
-            f"Substantive (Alltag): mercado→Markt, bicicleta→Fahrrad, estudiante→Student, alojamiento→Unterkunft, campus→Campus\n"
-            f"Grammatik: el→der, la→die, en→in, de→von, del→des, con→mit, mi→mein, cerca→nah\n\n"
+            f"Substantive: mercado→Markt, bicicleta→Fahrrad, estudiante→Student, alojamiento→Unterkunft, campus→Campus\n"
+            f"Grammatik: el→der, la→die, en→in, de→von, del→des, al→zum, con→mit, mi→mein\n\n"
+            f"DISAMBIGUIERUNGSREGELN (mit Kontext anwenden!):\n"
+            f"- PRON + 'gustar/doler/encantar/interesar': Dativ (mir, dir, ihm/ihr, uns, euch, ihnen).\n"
+            f"  Beispiel: 'Me gusta...' → 'mir'; 'Le duele...' → 'ihm' (wenn Geschlecht unklar, wähle plausibel).\n"
+            f"- PRON + transitives Verb: Akkusativ (mich, dich, ihn/sie/es, uns, euch, sie).\n"
+            f"- 'gustar/gusta/gustan' → immer 'gefallen' (Verb, kleingeschrieben).\n"
+            f"- 'del' → 'des', 'al' → 'zum'.\n\n"
             f"REGELN:\n"
-            f"- Übersetze NUR ins Deutsche (kein Spanisch, kein Englisch!)\n"
-            f"- Verben/Adjektive → kleingeschrieben\n"
-            f"- Substantive → GROẞGESCHRIEBEN\n"
-            f"- Nur EIN Wort als Übersetzung\n\n"
+            f"- Übersetze NUR ins Deutsche (kein Spanisch, kein Englisch!).\n"
+            f"- Gib GENAU EIN deutsches Wort (keine '/', keine Varianten, keine Klammern).\n"
+            f"- Verben/Adjektive → kleingeschrieben. Substantive → GROẞGESCHRIEBEN.\n"
+            f"- Keine Erklärungen in der Übersetzungszeile.\n\n"
             f"AUSGABEFORMAT (NUR diese 2 Zeilen!):\n"
             f"DEUTSCH: [ein Wort, korrekte Groß-/Kleinschreibung]\n"
-            f"KATEGORIE: [wähle genau eine aus: Essen, Wetter, Schule, Alltag, Körper, Familie, Kleidung, Bildung, Grammatik]\n"
-            f"(Essen=Lebensmittel/Obst/Gemüse, Grammatik=Artikel/Pronomen/Präpositionen, Alltag=allgemeine Verben/Adjektive/Substantive, Bildung=Schule/Uni; wenn unsicher, wähle nächstliegende)\n\n"
+            f"KATEGORIE: [wähle genau eine aus: Adjektive, Alltag, Begrüßung, Bildung, Freizeit, Grundlagen, Häufigkeit, Höflichkeit, Menschen, Natur, Orte, Reisen, Tiere, Verkehr, Wetter, Wohnen, Zeit]\n\n"
+            f"KATEGORIE-ERKLÄRUNG:\n"
+            f"- Adjektive: Eigenschaftswörter (schnell, groß, klein, schön)\n"
+            f"- Alltag: Allgemeine Verben und häufige Substantive (kaufen, essen, gehen, Markt, Fahrrad)\n"
+            f"- Begrüßung: Grußformeln und Höflichkeitsformen (hallo, tschüss, danke, bitte)\n"
+            f"- Bildung: Schule, Universität, Lernen (Student, studieren, Buch, Unterricht)\n"
+            f"- Freizeit: Hobbys, Aktivitäten (Musik, Film, Sport, spielen, lesen)\n"
+            f"- Grundlagen: Basiswörter, Artikel, Pronomen, Zahlen (der, die, ich, du, eins, zwei)\n"
+            f"- Häufigkeit: Zeitadverbien (immer, manchmal, oft, nie)\n"
+            f"- Höflichkeit: Höfliche Ausdrücke (bitte, danke, Entschuldigung)\n"
+            f"- Menschen: Personen, Familie, Beziehungen (Mutter, Vater, Freund, Kind)\n"
+            f"- Natur: Pflanzen, Landschaft, Umwelt (Baum, Blume, Berg, Fluss)\n"
+            f"- Orte: Gebäude, Plätze, Lokationen (Haus, Markt, Park, Stadt)\n"
+            f"- Reisen: Transport, Unterkunft, Tourismus (Hotel, Flughafen, Koffer, reisen)\n"
+            f"- Tiere: Alle Tiere (Hund, Katze, Vogel, Pferd)\n"
+            f"- Verkehr: Fahrzeuge, Straßenverkehr (Auto, Bus, Straße, fahren)\n"
+            f"- Wetter: Wetterphänomene und Klima (Sonne, Regen, Hitze, kalt)\n"
+            f"- Wohnen: Zuhause, Möbel, Haushalt (Haus, Wohnung, Tisch, Bett)\n"
+            f"- Zeit: Zeitangaben (heute, morgen, gestern, Uhr, Tag)\n\n"
             f"BEISPIELE:\n"
+            f"me (in 'Me gusta el café') → DEUTSCH: mir, KATEGORIE: Grundlagen\n"
+            f"le (in 'Le duele la cabeza') → DEUTSCH: ihm, KATEGORIE: Grundlagen\n"
+            f"gustan → DEUTSCH: gefallen, KATEGORIE: Alltag\n"
+            f"del → DEUTSCH: des, KATEGORIE: Grundlagen\n"
+            f"al → DEUTSCH: zum, KATEGORIE: Grundlagen\n"
             f"comprar → DEUTSCH: kaufen, KATEGORIE: Alltag\n"
-            f"durazno → DEUTSCH: Pfirsich, KATEGORIE: Essen\n"
-            f"fresco → DEUTSCH: frisch, KATEGORIE: Alltag\n"
-            f"mercado → DEUTSCH: Markt, KATEGORIE: Alltag\n"
-            f"bicicleta → DEUTSCH: Fahrrad, KATEGORIE: Alltag\n"
-            f"necesitar → DEUTSCH: brauchen, KATEGORIE: Alltag\n"
-            f"arreglar → DEUTSCH: reparieren, KATEGORIE: Alltag\n"
-            f"cerca → DEUTSCH: nah, KATEGORIE: Alltag\n"
-            f"alojamiento → DEUTSCH: Unterkunft, KATEGORIE: Alltag\n"
-            f"del → DEUTSCH: des, KATEGORIE: Grammatik\n"
-            f"mi → DEUTSCH: mein, KATEGORIE: Grammatik\n"
+            f"durazno → DEUTSCH: Pfirsich, KATEGORIE: Alltag\n"
+            f"fresco → DEUTSCH: frisch, KATEGORIE: Adjektive\n"
+            f"mercado → DEUTSCH: Markt, KATEGORIE: Orte\n"
+            f"bicicleta → DEUTSCH: Fahrrad, KATEGORIE: Verkehr\n"
         )
         
         try:
@@ -533,7 +592,7 @@ def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=
             "Spanisch": zu_speicherndes_wort,  # Lemma/Grundform (durazno, comer, rápido)
             "Deutsch": deutsch,
             "Beispielsatz": original_satz,
-            "last_repetition": heute,
+            "letzte Wiederholung": heute,
             "Kategorie": kategorie
             
         }
@@ -545,13 +604,14 @@ def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=
             # Entferne leere Zeilen (alle Spalten sind leer oder NaN)
             df = df.dropna(how='all')
             
-            # Prüfe, welche Spalte für das Datum existiert (mit oder ohne Unterstrich)
+            # Prüfe, welche Spalte für das Datum existiert (alte Namen auf neue migrieren)
             if 'lastrepetition' in df.columns:
-                # Umbenennen: lastrepetition -> last_repetition
-                df = df.rename(columns={'lastrepetition': 'last_repetition'})
+                df = df.rename(columns={'lastrepetition': 'letzte Wiederholung'})
+            if 'last_repetition' in df.columns:
+                df = df.rename(columns={'last_repetition': 'letzte Wiederholung'})
             
             # Stelle sicher, dass die Spalten in der richtigen Reihenfolge sind
-            spalten_reihenfolge = ["Spanisch", "Deutsch", "Beispielsatz", "last_repetition", "Kategorie"]
+            spalten_reihenfolge = ["Spanisch", "Deutsch", "Beispielsatz", "letzte Wiederholung", "Kategorie"]
             
             # Prüfe, ob alle benötigten Spalten vorhanden sind
             fehlende_spalten = [col for col in spalten_reihenfolge if col not in df.columns]
@@ -564,17 +624,17 @@ def fuege_neue_vokabeln_hinzu(csv_datei, neue_worter, original_satz, token_info=
             # Falls die CSV andere Spalten hat, ordne sie neu an
             df = df[spalten_reihenfolge]
         except FileNotFoundError:
-            df = pd.DataFrame(columns=["Spanisch", "Deutsch", "Beispielsatz", "last_repetition", "Kategorie"])
+            df = pd.DataFrame(columns=["Spanisch", "Deutsch", "Beispielsatz", "letzte Wiederholung", "Kategorie"])
         
         # Neue Zeile hinzufügen mit expliziter Spaltenreihenfolge
-        neue_zeile_df = pd.DataFrame([neue_zeile], columns=["Spanisch", "Deutsch", "Beispielsatz", "last_repetition", "Kategorie"])
+        neue_zeile_df = pd.DataFrame([neue_zeile], columns=["Spanisch", "Deutsch", "Beispielsatz", "letzte Wiederholung", "Kategorie"])
         df = pd.concat([df, neue_zeile_df], ignore_index=True)
         
         # Nochmal leere Zeilen entfernen vor dem Speichern
         df = df.dropna(how='all')
         
         # Sicherstellen, dass beim Speichern die Spaltenreihenfolge erhalten bleibt
-        df = df[["Spanisch", "Deutsch", "Beispielsatz", "last_repetition", "Kategorie"]]
+        df = df[["Spanisch", "Deutsch", "Beispielsatz", "letzte Wiederholung", "Kategorie"]]
         df.to_csv(csv_datei, sep=';', index=False)
         
         print(f"   ✓ {zu_speicherndes_wort} → {deutsch} ({kategorie})")
@@ -600,5 +660,5 @@ if __name__ == "__main__":
         print(f"\n{'='*70}")
         print(f"TEST {i}/{len(test_saetze)}: {satz}")
         print(f"{'='*70}")
-        uebersetze_und_lerne(index, satz=satz, csv_datei="../vokabeln.csv")
+        uebersetze_und_lerne(index, satz=satz, csv_datei="../vokabelliste.csv")
         print(f"\n✅ Test {i} abgeschlossen\n")
